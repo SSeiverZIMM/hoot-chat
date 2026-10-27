@@ -619,13 +619,13 @@ export default function App() {
     <div style={styles.container}>
       <div style={styles.toolbar}>
         <button style={styles.toolButton} onClick={() => exportBBCode(allMessages)}>
-          导出记录
+          导出
         </button>
         <button
           style={{ ...styles.toolButton, ...(clearArmed ? styles.toolButtonDanger : {}) }}
           onClick={armClear}
         >
-          {clearArmed ? "⚠ 再点一次确认清空" : "清空记录"}
+          {clearArmed ? "确认清空？" : "清空"}
         </button>
       </div>
       <div style={styles.messageList}>
@@ -735,6 +735,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     height: "100vh",
+    position: "relative",
   },
   loading: {
     display: "flex",
@@ -744,30 +745,36 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
   },
   toolbar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
     display: "flex",
     gap: "8px",
-    padding: "6px 10px",
-    borderBottom: "1px solid #2a2a4a",
-    background: "#12121e",
+    padding: "8px 12px",
+    background: "rgba(18, 18, 30, 0.55)",
+    backdropFilter: "blur(10px)",
+    WebkitBackdropFilter: "blur(10px)",
+    borderBottom: "1px solid rgba(42, 42, 74, 0.6)",
   },
   toolButton: {
-    background: "rgba(91, 91, 214, 0.25)",
-    color: "#aaa",
-    border: "1px solid rgba(91, 91, 214, 0.4)",
+    background: "#5b5bd6",
+    color: "#fff",
+    border: "none",
     borderRadius: "6px",
-    padding: "4px 10px",
+    padding: "4px 12px",
     cursor: "pointer",
+    fontWeight: 600,
     fontSize: "12px",
   },
   toolButtonDanger: {
-    background: "rgba(239, 68, 68, 0.2)",
-    color: "#f87171",
-    border: "1px solid rgba(239, 68, 68, 0.6)",
+    background: "#ef4444",
   },
   messageList: {
     flex: 1,
     overflowY: "auto",
-    padding: "12px",
+    padding: "48px 12px 12px",
     display: "flex",
     flexDirection: "column",
     gap: "8px",
