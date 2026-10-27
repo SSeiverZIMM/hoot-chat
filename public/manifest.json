@@ -1,13 +1,13 @@
 {
-  "name": "喵语聊天 Hoot Chat 中文版",
+  "name": "Hoot Chat",
   "version": "0.7.0",
   "manifest_version": 1,
   "author": "Ardent Light",
-  "description": "中文聊天扩展：DnD 式文字掷骰、BBCode 记录导出、场外发言、弹窗通知",
+  "description": "中文版：DnD掷骰公式、BBCode记录导出、场外发言、暗骰与私聊、编辑与删除、弹窗通知",
   "icon": "/icon.svg",
   "background_url": "/background.html",
   "action": {
-    "title": "喵语聊天",
+    "title": "Hoot Chat",
     "icon": "/icon.svg",
     "popover": "/",
     "height": 500,
