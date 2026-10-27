@@ -15,6 +15,7 @@ const DICE_PREFIX = "rodeo.owlbear.dice/";
 const CHAT_STATUS_CHANNEL = "com.hootchat/chat-status";
 const STATUS_REQUEST_CHANNEL = "com.hootchat/status-request";
 const MSG_BROADCAST_CHANNEL = "com.hootchat/message";
+const EDIT_CHANNEL = "com.hootchat/edit";
 const CLEAR_CHANNEL = "com.hootchat/clear";
 const HISTORY_KEY = "com.hootchat/history";
 const HISTORY_MAX_BYTES = 4 * 1024;
@@ -297,15 +298,20 @@ export default function App() {
   const [showHelp, setShowHelp] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
   const [isHost, setIsHost] = useState(false);
+  const [whisperMatch, setWhisperMatch] = useState<{ query: string; from: number } | null>(null);
+  const [msgMenu, setMsgMenu] = useState<{ x: number; y: number; msg: ChatMessage } | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const playerIdRef = useRef("");
   const myNameRef = useRef("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const lastRollFingerprintRef = useRef<string | null>(null);
   const allMessagesRef = useRef<ChatMessage[]>([]);
   const seenRef = useRef(new Set<string>());
   const isHostRef = useRef(false);
   const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const partyRef = useRef<{ id: string; name: string; color: string }[]>([]);
 
   function setHostFlag(v: boolean) {
     isHostRef.current = v;
@@ -392,12 +398,30 @@ export default function App() {
 
       // GM（房主）判定：导出/清空按钮与云端存档写入均由 GM 端负责
       const party = await OBR.party.getPlayers();
+      partyRef.current = party.map((p) => ({ id: p.id, name: p.name, color: p.color }));
       setHostFlag((await OBR.player.getRole()) === "GM");
 
 
       // Receive messages from other clients (and echoed own messages)
       unsubs.push(OBR.broadcast.onMessage(MSG_BROADCAST_CHANNEL, (event) => {
         if (event.data) addMessages([event.data as ChatMessage]);
+      }));
+
+      // Receive message edits / deletions from other clients
+      unsubs.push(OBR.broadcast.onMessage(EDIT_CHANNEL, (event) => {
+        const data = event.data as { kind: "delete" | "edit"; id: string; text?: string } | null;
+        if (!data || !data.id) return;
+        let updated: ChatMessage[];
+        if (data.kind === "delete") {
+          updated = allMessagesRef.current.filter((m) => m.id !== data.id);
+        } else if (data.kind === "edit" && typeof data.text === "string") {
+          updated = allMessagesRef.current.map((m) =>
+            m.id === data.id && m.type === "text" ? { ...m, text: data.text! } : m
+          );
+        } else return;
+        allMessagesRef.current = updated;
+        setAllMessages(updated);
+        writeHistory(updated);
       }));
 
       // Receive clear requests from other clients
@@ -411,6 +435,7 @@ export default function App() {
       unsubs.push(
         OBR.party.onChange(async (party) => {
           setHostFlag((await OBR.player.getRole()) === "GM");
+          partyRef.current = party.map((p) => ({ id: p.id, name: p.name, color: p.color }));
           for (const p of party) updatePlayerInfo(p.id, p.name, p.color);
         })
       );
@@ -502,21 +527,79 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
   }, [allMessages[allMessages.length - 1]?.id]);
 
+  function clearInput() {
+    setInput("");
+    setWhisperMatch(null);
+  }
+
+  function pickWhisper(name: string) {
+    if (!whisperMatch) return;
+    setInput(input.slice(0, whisperMatch.from) + "/@" + name + " ");
+    setWhisperMatch(null);
+    inputRef.current?.focus();
+  }
+
+  function openMsgMenu(e: React.MouseEvent, msg: ChatMessage) {
+    // 仅自己的消息可修改，删除允许自己或 GM
+    const canModify = msg.playerId === playerIdRef.current || isHostRef.current;
+    if (!canModify) return;
+    e.preventDefault();
+    setMsgMenu({ x: e.clientX, y: e.clientY, msg });
+  }
+
+  function startEdit(msg: ChatMessage) {
+    if (msg.type !== "text") return;
+    setEditingId(msg.id);
+    setInput(msg.text);
+    setMsgMenu(null);
+    inputRef.current?.focus();
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    clearInput();
+  }
+
+  function deleteMsg(msg: ChatMessage) {
+    const updated = allMessagesRef.current.filter((m) => m.id !== msg.id);
+    allMessagesRef.current = updated;
+    setAllMessages(updated);
+    writeHistory(updated);
+    OBR.broadcast.sendMessage(EDIT_CHANNEL, { kind: "delete", id: msg.id }).catch(console.error);
+    setMsgMenu(null);
+  }
+
   async function sendMessage() {
     const text = input.trim();
     if (!text) return;
+
+    // 编辑模式：替换目标文本消息内容
+    if (editingId) {
+      const updated = allMessagesRef.current.map((m) =>
+        m.id === editingId && m.type === "text" ? { ...m, text } : m
+      );
+      allMessagesRef.current = updated;
+      setAllMessages(updated);
+      writeHistory(updated);
+      OBR.broadcast
+        .sendMessage(EDIT_CHANNEL, { kind: "edit", id: editingId, text })
+        .catch(console.error);
+      setEditingId(null);
+      clearInput();
+      return;
+    }
 
     // 场外发言：// 开头，暗化显示，不参与导出
     if (text.startsWith("//")) {
       const oocText = text.slice(2).trim();
       if (!oocText) return;
-      setInput("");
+      clearInput();
       await sendText(oocText, { ooc: true });
       return;
     }
 
     if (text === "/clear") {
-      setInput("");
+      clearInput();
       armClear();
       return;
     }
@@ -526,20 +609,41 @@ export default function App() {
       if (/^\/s(\s|$)/i.test(text)) {
         const content = text.replace(/^\/s\s*/i, "").trim();
         if (!content) return;
-        setInput("");
+        clearInput();
         await sendText(content, { hidden: true });
         return;
       }
-      // 悄悄话：仅目标玩家可见
-      const whisperMatch = text.match(/^\/@(\S+)\s+([\s\S]+)$/);
-      if (whisperMatch) {
-        setInput("");
-        await sendText(whisperMatch[2].trim(), { whisper: whisperMatch[1] });
+      // 悄悄话：仅目标玩家可见（优先按房间内真实玩家名断句，支持含空格的名字）
+      if (text.startsWith("/@")) {
+        const rest = text.slice(2);
+        const candidates = [
+          { id: playerIdRef.current, name: myNameRef.current },
+          ...partyRef.current,
+        ].filter((c) => c.name);
+        let target: { name: string; id?: string; content: string } | null = null;
+        for (const c of [...candidates].sort((a, b) => b.name.length - a.name.length)) {
+          if (rest === c.name) return; // 只输入了名字还没写内容：不发送
+          if (rest.startsWith(c.name + " ")) {
+            target = { name: c.name, id: c.id, content: rest.slice(c.name.length + 1).trim() };
+            break;
+          }
+        }
+        if (!target) {
+          // 兜底：未知玩家名按第一个空格断句
+          const fallback = rest.match(/^(\S+)\s+([\s\S]+)$/);
+          if (fallback) target = { name: fallback[1], content: fallback[2].trim() };
+        }
+        if (!target || !target.content) return;
+        clearInput();
+        await sendText(target.content, {
+          whisper: target.name,
+          ...(target.id && { whisperId: target.id }),
+        });
         return;
       }
       const result = parseRollInput(text);
       if (!result) return; // 未知指令：不发送
-      setInput("");
+      clearInput();
       const p = result.parsed;
       sendRoll(p.dice, p.bonus, p.keep, p.label).catch(console.error);
       return;
@@ -551,7 +655,7 @@ export default function App() {
       const prefix = text.slice(0, inlineMatch.index).trim();
       const result = parseRollInput(text.slice(inlineMatch.index).trim());
       if (result) {
-        setInput("");
+        clearInput();
         const p = result.parsed;
         sendRoll(p.dice, p.bonus, p.keep, p.label, prefix).catch(console.error);
         return;
@@ -559,11 +663,14 @@ export default function App() {
       // 解析失败 → 落回普通文本消息
     }
 
-    setInput("");
+    clearInput();
     await sendText(text);
   }
 
-  async function sendText(text: string, extra?: { ooc?: boolean; hidden?: boolean; whisper?: string }) {
+  async function sendText(
+    text: string,
+    extra?: { ooc?: boolean; hidden?: boolean; whisper?: string; whisperId?: string }
+  ) {
     const msg: ChatMessage = {
       id: newId(),
       playerId: playerIdRef.current,
@@ -609,6 +716,11 @@ export default function App() {
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Escape" && editingId) {
+      e.preventDefault();
+      cancelEdit();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -656,7 +768,7 @@ export default function App() {
         <div><code style={styles.helpCmd}>/@玩家名 文字</code> 悄悄话</div>
         <div style={styles.helpIndent}>
           <div style={styles.helpExample}>/@张三 把卷轴藏进袖中</div>
-          <div>仅对方可见，他人只会看到「有人在暗中密谋着行动……」</div>
+          <div>输入 /@ 会弹出玩家列表，点击名字自动填入；仅对方可见</div>
         </div>
       </div>
       <div style={styles.helpSection}>
@@ -668,6 +780,12 @@ export default function App() {
       </div>
       <div style={styles.helpSection}>
         <div><code style={styles.helpCmd}>/clear</code> 清空全部聊天记录（GM 可用，需二次确认）</div>
+      </div>
+      <div style={styles.helpSection}>
+        <div>右键消息</div>
+        <div style={styles.helpIndent}>
+          <div>可修改或删除自己的消息（骰子消息仅可删除）；GM 可删除任何消息</div>
+        </div>
       </div>
     </div>
   );
@@ -718,7 +836,10 @@ export default function App() {
               ? textMsg !== null && msg.playerId === playerIdRef.current
               : secret === "player" && textMsg !== null
                 ? msg.playerId === playerIdRef.current ||
-                  (textMsg.whisper ?? "").toLowerCase() === myNameRef.current.toLowerCase()
+                  (textMsg.whisperId
+                    ? textMsg.whisperId === playerIdRef.current
+                    : (textMsg.whisper ?? "").toLowerCase() ===
+                      myNameRef.current.toLowerCase())
                 : true;
           const isPlaceholder = secret !== null && !canSee;
           return (
@@ -728,6 +849,7 @@ export default function App() {
                 ...styles.message,
                 ...(isOoc ? styles.oocMessage : {}),
               }}
+              onContextMenu={(e) => openMsgMenu(e, msg)}
             >
               <span style={{ ...styles.name, ...nameStyle(msg.playerColor) }}>
                 {msg.playerName}
@@ -756,6 +878,38 @@ export default function App() {
         })}
         <div ref={bottomRef} />
       </div>
+      {whisperMatch && (
+        <div style={styles.whisperList}>
+          {(() => {
+            const list = partyRef.current.filter(
+              (p) =>
+                p.id !== playerIdRef.current &&
+                p.name.toLowerCase().includes(whisperMatch.query.toLowerCase())
+            );
+            if (list.length === 0) {
+              return (
+                <div style={{ ...styles.whisperItem, color: "#666", cursor: "default" }}>
+                  没有匹配的玩家，可直接输入名字后空格继续
+                </div>
+              );
+            }
+            return list.map((p) => (
+              <div
+                key={p.id}
+                style={styles.whisperItem}
+                onClick={() => pickWhisper(p.name)}
+                onMouseEnter={(e) =>
+                  (e.currentTarget.style.background = "rgba(91, 91, 214, 0.25)")
+                }
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                <span style={{ color: p.color, fontWeight: 700 }}>{p.name}</span>
+                <span style={{ color: "#666", fontSize: "11px" }}>点击填入</span>
+              </div>
+            ));
+          })()}
+        </div>
+      )}
       <div style={styles.inputRow}>
         <button
           style={{
@@ -763,23 +917,73 @@ export default function App() {
             ...(showHelp ? styles.helpToggleActive : {}),
           }}
           onClick={() => setShowHelp((v) => !v)}
+          onMouseEnter={(e) => {
+            if (!showHelp) e.currentTarget.style.color = "#aaa";
+          }}
+          onMouseLeave={(e) => {
+            if (!showHelp) e.currentTarget.style.color = "#666";
+          }}
           title="指令帮助"
         >
           ?
         </button>
         <input
-          style={styles.input}
+          ref={inputRef}
+          style={{ ...styles.input, ...(editingId ? styles.inputEditing : {}) }}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setInput(v);
+            const m = v.match(/\/@([^\s@]*)$/);
+            setWhisperMatch(m ? { query: m[1], from: v.length - m[0].length } : null);
+          }}
           onKeyDown={handleKeyDown}
-          placeholder="输入消息…（// 开头为场外发言）"
+          placeholder={editingId ? "编辑消息中…（Enter 确认，Esc 取消）" : "输入消息…（// 开头为场外发言）"}
           maxLength={500}
           autoFocus
         />
         <button style={styles.button} onClick={sendMessage}>
-          发送
+          {editingId ? "保存" : "发送"}
         </button>
       </div>
+      {msgMenu && (
+        <>
+          <div
+            style={styles.menuBackdrop}
+            onClick={() => setMsgMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMsgMenu(null);
+            }}
+          />
+          <div
+            style={{
+              ...styles.msgMenu,
+              left: Math.min(msgMenu.x, 360 - 110),
+              top: Math.min(msgMenu.y, 500 - 100),
+            }}
+          >
+            {msgMenu.msg.playerId === playerIdRef.current && msgMenu.msg.type === "text" && (
+              <div
+                style={styles.msgMenuItem}
+                onClick={() => startEdit(msgMenu.msg)}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(91, 91, 214, 0.3)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              >
+                修改
+              </div>
+            )}
+            <div
+              style={{ ...styles.msgMenuItem, color: "#f87171" }}
+              onClick={() => deleteMsg(msgMenu.msg)}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(239, 68, 68, 0.25)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            >
+              删除
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -847,23 +1051,71 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "text",
   },
   helpToggle: {
-    width: "26px",
-    height: "26px",
+    width: "28px",
+    height: "28px",
     flexShrink: 0,
     borderRadius: "50%",
-    border: "1px solid #3a3a5a",
-    background: "#2a2a4a",
-    color: "#aaa",
+    border: "none",
+    background: "transparent",
+    color: "#666",
     cursor: "pointer",
-    fontSize: "13px",
+    fontSize: "16px",
     fontWeight: 700,
     lineHeight: 1,
     padding: 0,
   },
   helpToggleActive: {
-    background: "#5b5bd6",
+    background: "rgba(91, 91, 214, 0.3)",
+    color: "#c4b5fd",
+  },
+  whisperList: {
+    position: "absolute",
+    left: "10px",
+    right: "10px",
+    bottom: "56px",
+    zIndex: 6,
+    background: "rgba(26, 26, 46, 0.97)",
+    border: "1px solid rgba(91, 91, 214, 0.4)",
+    borderRadius: "8px",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+  },
+  whisperItem: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "8px 12px",
+    cursor: "pointer",
+    fontSize: "13px",
+  },
+  inputEditing: {
     borderColor: "#5b5bd6",
-    color: "#fff",
+  },
+  menuBackdrop: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 19,
+  },
+  msgMenu: {
+    position: "fixed",
+    zIndex: 20,
+    background: "rgba(26, 26, 46, 0.97)",
+    border: "1px solid rgba(91, 91, 214, 0.4)",
+    borderRadius: "8px",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+    display: "flex",
+    flexDirection: "column",
+    minWidth: "100px",
+    overflow: "hidden",
+  },
+  msgMenuItem: {
+    padding: "8px 14px",
+    cursor: "pointer",
+    fontSize: "13px",
+    color: "#d0d0d0",
+    userSelect: "none",
   },
   secretPlaceholder: {
     color: "#5a5a6e",

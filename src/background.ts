@@ -107,8 +107,9 @@ OBR.onReady(async () => {
     if (msg.type === "text" && (msg.hidden || msg.whisper)) {
       const canSee =
         !msg.hidden &&
-        !!msg.whisper &&
-        msg.whisper.toLowerCase() === myName.toLowerCase();
+        (msg.whisperId
+          ? msg.whisperId === myId
+          : !!msg.whisper && msg.whisper.toLowerCase() === myName.toLowerCase());
       if (!canSee) return;
     }
 

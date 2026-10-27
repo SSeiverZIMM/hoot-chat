@@ -17,6 +17,7 @@ export interface TextMessage extends ChatMessageBase {
   ooc?: boolean; // 场外发言（// 前缀），导出时排除
   hidden?: boolean; // 暗骰发言（/s）：仅发送者可见
   whisper?: string; // 悄悄话（/@玩家名）：仅目标玩家可见
+  whisperId?: string; // 目标玩家 ID（点击列表补全时附带，避免重名/含空格问题）
 }
 
 export interface RollMessage extends ChatMessageBase {
