@@ -390,10 +390,9 @@ export default function App() {
       const history = Array.isArray(meta[HISTORY_KEY]) ? (meta[HISTORY_KEY] as ChatMessage[]) : [];
       addMessages(history);
 
-      // Determine initial host (player with lexicographically lowest ID)
+      // GM（房主）判定：导出/清空按钮与云端存档写入均由 GM 端负责
       const party = await OBR.party.getPlayers();
-      const allIds = [playerIdRef.current, ...party.map((p) => p.id)];
-      setHostFlag(playerIdRef.current === [...allIds].sort()[0]);
+      setHostFlag((await OBR.player.getRole()) === "GM");
 
 
       // Receive messages from other clients (and echoed own messages)
@@ -410,9 +409,8 @@ export default function App() {
       }));
 
       unsubs.push(
-        OBR.party.onChange((party) => {
-          const allIds = [playerIdRef.current, ...party.map((p) => p.id)];
-          setHostFlag(playerIdRef.current === [...allIds].sort()[0]);
+        OBR.party.onChange(async (party) => {
+          setHostFlag((await OBR.player.getRole()) === "GM");
           for (const p of party) updatePlayerInfo(p.id, p.name, p.color);
         })
       );
