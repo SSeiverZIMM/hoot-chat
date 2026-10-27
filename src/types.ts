@@ -14,14 +14,15 @@ interface ChatMessageBase {
 export interface TextMessage extends ChatMessageBase {
   type: "text";
   text: string;
+  ooc?: boolean; // 场外发言（// 前缀），导出时排除
 }
 
 export interface RollMessage extends ChatMessageBase {
   type: "roll";
   dice: RollDie[];
   bonus: number;
-  netEdges?: number; // present on power rolls
-  hasSkill?: boolean; // present on power rolls when applicable skill used
+  keep?: { mode: "h" | "l"; n: number }; // khN/klN：掷多颗取高/取低
+  label?: string; // 检定名，如"生存"
 }
 
 export type ChatMessage = TextMessage | RollMessage;

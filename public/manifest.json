@@ -1,13 +1,13 @@
 {
-  "name": "Hoot Chat",
-  "version": "0.6.0",
+  "name": "喵语聊天 Hoot Chat 中文版",
+  "version": "0.7.0",
   "manifest_version": 1,
   "author": "Ardent Light",
-  "description": "A simple chat extension",
+  "description": "中文聊天扩展：DnD 式文字掷骰、BBCode 记录导出、场外发言、弹窗通知",
   "icon": "/icon.svg",
   "background_url": "/background.html",
   "action": {
-    "title": "Hoot Chat",
+    "title": "喵语聊天",
     "icon": "/icon.svg",
     "popover": "/",
     "height": 500,

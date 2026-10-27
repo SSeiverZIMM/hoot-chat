@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import OBR from "@owlbear-rodeo/sdk";
 import { ChatMessage } from "./types";
+import { diceNotation, keptValues, nat20Result, rollTitle, rollTotal } from "./roll";
 
 const NOTIF_ID = "com.hootchat/notification";
 const NOTIF_UPDATE_CHANNEL = "com.hootchat/notif-update";
@@ -18,6 +19,59 @@ function hexLuminance(hex: string): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
+function RollText({ msg }: { msg: Extract<ChatMessage, { type: "roll" }> }) {
+  const { kept } = keptValues(msg.dice, msg.keep);
+  const keptCopy = [...kept];
+  const total = rollTotal(msg.dice, msg.bonus, msg.keep);
+  const nat = nat20Result(msg.dice, msg.keep);
+
+  return (
+    <>
+      <span style={{ fontStyle: "italic" }}>🎲 {rollTitle(msg.label, msg.keep)} </span>
+      <span style={{ color: "#555" }}>{diceNotation(msg.dice, 0, msg.keep)}： </span>
+      {msg.dice.map((d, i) => {
+        const idx = keptCopy.indexOf(d.value);
+        const isKept = idx >= 0;
+        if (isKept) keptCopy.splice(idx, 1);
+        return (
+          <span key={i}>
+            {i > 0 && <span style={{ color: "#555" }}> + </span>}
+            <span
+              style={{
+                fontWeight: isKept ? 700 : 400,
+                color: isKept ? undefined : "#555",
+                textDecoration: isKept ? undefined : "line-through",
+              }}
+            >
+              {d.value}
+            </span>
+          </span>
+        );
+      })}
+      {msg.bonus !== 0 && (
+        <span style={{ color: "#888" }}>
+          {" "}
+          {msg.bonus > 0 ? "+" : "-"} {Math.abs(msg.bonus)}
+        </span>
+      )}
+      <span style={{ color: "#555" }}> = </span>
+      <span style={{ color: "#a78bfa", fontWeight: 700 }}>{total}</span>
+      {nat === "crit" && (
+        <>
+          {" "}
+          <span style={{ color: "#fbbf24", fontWeight: 700 }}>🎉 大成功！</span>
+        </>
+      )}
+      {nat === "fail" && (
+        <>
+          {" "}
+          <span style={{ color: "#ef4444", fontWeight: 700 }}>💀 大失败…</span>
+        </>
+      )}
+    </>
+  );
+}
+
 function NotifCard({
   msg,
   onDismiss,
@@ -26,6 +80,7 @@ function NotifCard({
   onDismiss: () => void;
 }) {
   const dark = hexLuminance(msg.playerColor) < 0.1;
+  const isOoc = msg.type === "text" && !!msg.ooc;
   return (
     <div
       style={{
@@ -39,6 +94,7 @@ function NotifCard({
         alignItems: "flex-start",
         gap: "4px 6px",
         userSelect: "none",
+        ...(isOoc && { opacity: 0.5 }),
       }}
     >
       <span
@@ -59,67 +115,15 @@ function NotifCard({
       </span>
       <span
         style={{
-          color: "#d0d0d0",
-          fontSize: "13px",
+          color: isOoc ? "#909090" : "#d0d0d0",
+          fontSize: isOoc ? "12px" : "13px",
           flex: 1,
           minWidth: "60%",
           wordBreak: "break-word",
           whiteSpace: "pre-wrap",
         }}
       >
-        {msg.type === "roll" ? (() => {
-          const isPowerRoll = msg.netEdges !== undefined;
-          const adj = Math.abs(msg.netEdges ?? 0) === 1 ? (msg.netEdges ?? 0) * 2 : 0;
-          const skillBonus = isPowerRoll && msg.hasSkill ? 2 : 0;
-          const total = msg.dice.reduce((s, d) => s + d.value, 0) + msg.bonus + (isPowerRoll ? adj : 0) + skillBonus;
-          const groups: { type: string; count: number }[] = [];
-          for (const die of msg.dice) {
-            const g = groups.find((g) => g.type === die.type);
-            if (g) g.count++;
-            else groups.push({ type: die.type, count: 1 });
-          }
-          const notation = groups.map((g) => `${g.count}${g.type.toLowerCase()}`).join(" + ");
-          const netEdges = msg.netEdges ?? 0;
-          const edgePart = netEdges === 1 ? "an edge" : netEdges === 2 ? "a double edge"
-            : netEdges === -1 ? "a bane" : netEdges === -2 ? "a double bane" : "";
-          const rollLabel = edgePart && msg.hasSkill ? ` with ${edgePart} and skill`
-            : edgePart ? ` with ${edgePart}`
-            : msg.hasSkill ? " with skill" : "";
-          return (
-            <>
-              <span style={{ fontStyle: "italic" }}>
-                rolled {notation}
-                {isPowerRoll && msg.bonus !== 0 && ` + ${msg.bonus}`}
-                {isPowerRoll && rollLabel}:{" "}
-              </span>
-              {msg.dice.map((d, i) => (
-                <span key={i}>
-                  {i > 0 && <span style={{ color: "#555" }}> + </span>}
-                  <span style={{ fontWeight: 700 }}>{d.value}</span>
-                </span>
-              ))}
-              {(isPowerRoll ? msg.bonus + adj + skillBonus : msg.bonus) !== 0 && (() => {
-                const mod = isPowerRoll ? msg.bonus + adj + skillBonus : msg.bonus;
-                return <span style={{ color: "#888" }}> ({mod > 0 ? "+ " : "- "}{Math.abs(mod)})</span>;
-              })()}
-              <span style={{ color: "#555" }}> = </span>
-              <span style={{ color: "#a78bfa", fontWeight: 700 }}>{total}</span>
-              {isPowerRoll && (() => {
-                const d10s = msg.dice.filter((d) => d.type === "D10").map((d) => d.value).sort((a, b) => b - a);
-                const crit = d10s.length >= 2 && d10s[0] === 10 && d10s[1] >= 9;
-                const base = total <= 11 ? 1 : total <= 16 ? 2 : 3;
-                const tier = crit ? 3 : netEdges === 2 ? Math.min(3, base + 1) : netEdges === -2 ? Math.max(1, base - 1) : base;
-                return (
-                  <>
-                    <span style={{ color: "#555" }}> | </span>
-                    <span style={{ background: "#c4b5fd", color: "#1a1a2e", fontWeight: 700, borderRadius: "3px", padding: "0 4px", whiteSpace: "nowrap" }}>Tier {tier}</span>
-                    {crit && <> <span style={{ background: "#ef4444", color: "#1a1a2e", fontWeight: 700, borderRadius: "3px", padding: "0 4px" }}>Crit!</span></>}
-                  </>
-                );
-              })()}
-            </>
-          );
-        })() : msg.text}
+        {msg.type === "roll" ? <RollText msg={msg} /> : msg.text}
       </span>
       <button
         onClick={onDismiss}

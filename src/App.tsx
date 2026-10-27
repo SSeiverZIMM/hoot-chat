@@ -1,11 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import OBR from "@owlbear-rodeo/sdk";
-import { ChatMessage, RollDie } from "./types";
+import { ChatMessage, RollDie, RollMessage } from "./types";
+import {
+  KeepSpec,
+  bbcodeDiceExpr,
+  diceNotation,
+  keptValues,
+  nat20Result,
+  rollTitle,
+  rollTotal,
+} from "./roll";
 
 const DICE_PREFIX = "rodeo.owlbear.dice/";
 const CHAT_STATUS_CHANNEL = "com.hootchat/chat-status";
 const STATUS_REQUEST_CHANNEL = "com.hootchat/status-request";
 const MSG_BROADCAST_CHANNEL = "com.hootchat/message";
+const CLEAR_CHANNEL = "com.hootchat/clear";
 const HISTORY_KEY = "com.hootchat/history";
 const HISTORY_MAX_BYTES = 4 * 1024;
 
@@ -47,151 +57,191 @@ function newId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-function parsePowerRoll(args: string): { dice: RollDie[]; bonus: number; netEdges: number; hasSkill: boolean } | null {
-  let s = args.toLowerCase().trim();
+// --- 掷骰解析 ---
 
-  // Extract optional leading bonus: +N, -N, or N
-  let bonus = 0;
-  const bonusMatch = s.match(/^([+-]?\d+)\s*/);
-  if (bonusMatch) {
-    bonus = parseInt(bonusMatch[1]);
-    s = s.slice(bonusMatch[0].length);
-  }
-
-  // Extract edge/bane (check doubles first)
-  let netEdges = 0;
-  if (s.includes("double edge") || /\bde\b/.test(s)) {
-    netEdges =  2; s = s.replace("double edge", "").replace(/\bde\b/, "");
-  } else if (s.includes("double bane") || /\bdb\b/.test(s)) {
-    netEdges = -2; s = s.replace("double bane", "").replace(/\bdb\b/, "");
-  } else if (s.includes("edge") || /\be\b/.test(s)) {
-    netEdges =  1; s = s.replace("edge", "").replace(/\be\b/, "");
-  } else if (s.includes("bane") || /\bb\b/.test(s)) {
-    netEdges = -1; s = s.replace("bane", "").replace(/\bb\b/, "");
-  }
-
-  // Extract skill
-  let hasSkill = false;
-  if (s.includes("skill") || /\bs\b/.test(s)) {
-    hasSkill = true; s = s.replace("skill", "").replace(/\bs\b/, "");
-  }
-
-  // Reject unrecognized tokens
-  if (s.replace(/\s+/g, "").length > 0) return null;
-
-  const dice: RollDie[] = [
-    { type: "D10", value: Math.ceil(Math.random() * 10) },
-    { type: "D10", value: Math.ceil(Math.random() * 10) },
-  ];
-
-  return { dice, bonus, netEdges, hasSkill };
+interface ParsedRoll {
+  dice: RollDie[];
+  bonus: number;
+  keep?: KeepSpec;
+  label?: string;
 }
 
-function parseAndRoll(notation: string): { dice: RollDie[]; bonus: number } | null {
-  const s = notation.replace(/\s+/g, "");
-  if (!s) return null;
+const DIE_TOKEN = /^([+-]?)(\d*)d(\d+)(kh|kl|dh|dl)?(\d+)?$/i;
+const NUM_TOKEN = /^[+-]?\d+$/;
 
-  const tokens = s.split(/(?=[+-])/).filter(Boolean);
+/** 从输入末尾剥离检定名（不含骰子/数字语法的词），返回剩余表达式与检定名 */
+function splitLabel(input: string): { expr: string; label?: string } {
+  const segments = input.trim().split(/\s+/);
+  const labelParts: string[] = [];
+  while (segments.length > 0) {
+    const last = segments[segments.length - 1];
+    if (DIE_TOKEN.test(last) || NUM_TOKEN.test(last)) break;
+    labelParts.unshift(last);
+    segments.pop();
+  }
+  return {
+    expr: segments.join(""),
+    label: labelParts.length > 0 ? labelParts.join(" ") : undefined,
+  };
+}
+
+/** 解析 "2d6+3"、"1d20+6 生存"、"2d20kh1+5"、"4d6dl1" */
+function parseAndRoll(notation: string): ParsedRoll | null {
+  const { expr, label } = splitLabel(notation);
+  if (!expr) return null;
+
+  const tokens = expr.split(/(?=[+-])/).filter(Boolean);
   const dice: RollDie[] = [];
   let bonus = 0;
+  let firstKeep: KeepSpec | undefined;
+  let keepSeen = false;
 
   for (const token of tokens) {
     const sign = token.startsWith("-") ? -1 : 1;
     const part = token.replace(/^[+-]/, "");
-    const diceMatch = part.match(/^(\d*)d(\d+)$/i);
+
+    const diceMatch = part.match(DIE_TOKEN);
     if (diceMatch) {
-      if (sign < 0) return null; // negative dice groups not supported
-      const count = parseInt(diceMatch[1] || "1");
-      const sides = parseInt(diceMatch[2]);
+      if (sign < 0) return null; // 负数骰组不支持
+      const count = parseInt(diceMatch[2] || "1");
+      const sides = parseInt(diceMatch[3]);
       if (count < 1 || count > 100 || sides < 2 || sides > 10000) return null;
+
+      // keep/drop 规范化为 { mode, n }
+      let keep: KeepSpec | undefined;
+      const op = diceMatch[4]?.toLowerCase();
+      const opN = diceMatch[5] ? parseInt(diceMatch[5]) : 1;
+      if (op) {
+        if (op === "kh" || op === "kl") {
+          keep = { mode: op === "kh" ? "h" : "l", n: Math.min(Math.max(1, opN), count) };
+        } else {
+          // dl N：丢低 N 颗 = 取高 count-N；dh N：丢高 N 颗 = 取低 count-N
+          const keepN = count - opN;
+          if (keepN < 1) return null;
+          keep = { mode: op === "dl" ? "h" : "l", n: Math.min(keepN, count) };
+        }
+        if (keep.n >= count) keep = undefined;
+      }
+
       const type = `D${sides}`;
       for (let i = 0; i < count; i++) {
         dice.push({ type, value: Math.ceil(Math.random() * sides) });
       }
-    } else {
-      const num = parseInt(part);
-      if (isNaN(num) || part === "") return null;
-      bonus += sign * num;
+      // 同一表达式只取第一个 keep 参数，简化处理
+      if (!keepSeen) {
+        firstKeep = keep;
+        keepSeen = true;
+      }
+      continue;
     }
+
+    const num = parseInt(part);
+    if (isNaN(num)) return null;
+    bonus += sign * num;
   }
 
-  return dice.length > 0 ? { dice, bonus } : null;
+  if (dice.length === 0) return null;
+  return { dice, bonus, keep: firstKeep, label };
 }
 
-function powerRollLabel(netEdges: number, hasSkill: boolean): string {
-  const edgePart =
-    netEdges === 1 ? "an edge" :
-    netEdges === 2 ? "a double edge" :
-    netEdges === -1 ? "a bane" :
-    netEdges === -2 ? "a double bane" : "";
-  if (edgePart && hasSkill) return ` with ${edgePart} and skill`;
-  if (edgePart) return ` with ${edgePart}`;
-  if (hasSkill) return " with skill";
-  return "";
+/** 优势/劣势：等价于 2d20kh1 / 2d20kl1 */
+function parseAdvDis(args: string, mode: "h" | "l"): ParsedRoll | null {
+  const { expr, label } = splitLabel(args);
+  if (expr && !NUM_TOKEN.test(expr)) return null;
+  const bonus = expr ? parseInt(expr) : 0;
+  if (isNaN(bonus)) return null;
+  const dice: RollDie[] = [
+    { type: "D20", value: Math.ceil(Math.random() * 20) },
+    { type: "D20", value: Math.ceil(Math.random() * 20) },
+  ];
+  return { dice, bonus, keep: { mode, n: 1 }, label };
 }
 
-function edgeAdj(netEdges: number): number {
-  return Math.abs(netEdges) === 1 ? netEdges * 2 : 0;
-}
+// --- 掷骰渲染（聊天窗口）---
 
-function powerRollTier(total: number, netEdges: number, crit: boolean): number {
-  if (crit) return 3;
-  const base = total <= 11 ? 1 : total <= 16 ? 2 : 3;
-  if (netEdges === 2) return Math.min(3, base + 1);
-  if (netEdges === -2) return Math.max(1, base - 1);
-  return base;
-}
-
-function isCrit(dice: RollDie[]): boolean {
-  const d10s = dice.filter((d) => d.type === "D10").map((d) => d.value).sort((a, b) => b - a);
-  return d10s.length >= 2 && d10s[0] === 10 && d10s[1] >= 9;
-}
-
-function RollDisplay({ msg }: { msg: { dice: RollDie[]; bonus: number; netEdges?: number; hasSkill?: boolean } }) {
-  const isPowerRoll = msg.netEdges !== undefined;
-  const adj = edgeAdj(msg.netEdges ?? 0);
-  const skillBonus = isPowerRoll && msg.hasSkill ? 2 : 0;
-  const crit = isPowerRoll && isCrit(msg.dice);
-  const total = msg.dice.reduce((sum, d) => sum + d.value, 0)
-    + msg.bonus + (isPowerRoll ? adj : 0) + skillBonus;
-
-  // Build grouped notation like "2d10 + 1d6", preserving first-seen order
-  const groups: { type: string; count: number }[] = [];
-  for (const die of msg.dice) {
-    const g = groups.find((g) => g.type === die.type);
-    if (g) g.count++;
-    else groups.push({ type: die.type, count: 1 });
-  }
-  const notation = groups.map((g) => `${g.count}${g.type.toLowerCase()}`).join(" + ");
+function RollDisplay({ msg }: { msg: RollMessage }) {
+  const { kept } = keptValues(msg.dice, msg.keep);
+  const keptCopy = [...kept];
+  const total = rollTotal(msg.dice, msg.bonus, msg.keep);
+  const nat = nat20Result(msg.dice, msg.keep);
 
   return (
     <span>
-      <span style={{ color: "#888", fontStyle: "italic" }}>
-        rolled {notation}
-        {isPowerRoll && msg.bonus !== 0 && ` + ${msg.bonus}`}
-        {isPowerRoll && powerRollLabel(msg.netEdges!, !!msg.hasSkill)}:{" "}
-      </span>
-      {msg.dice.map((d, i) => (
-        <span key={i}>
-          {i > 0 && <span style={{ color: "#555" }}> + </span>}
-          <span style={{ fontWeight: 700 }}>{d.value}</span>
+      <span style={{ color: "#888", fontStyle: "italic" }}>🎲 {rollTitle(msg.label, msg.keep)} </span>
+      <span style={{ color: "#555" }}>{diceNotation(msg.dice, 0, msg.keep)}： </span>
+      {msg.dice.map((d, i) => {
+        const idx = keptCopy.indexOf(d.value);
+        const isKept = idx >= 0;
+        if (isKept) keptCopy.splice(idx, 1);
+        return (
+          <span key={i}>
+            {i > 0 && <span style={{ color: "#555" }}> + </span>}
+            <span
+              style={{
+                fontWeight: isKept ? 700 : 400,
+                color: isKept ? undefined : "#555",
+                textDecoration: isKept ? undefined : "line-through",
+              }}
+            >
+              {d.value}
+            </span>
+          </span>
+        );
+      })}
+      {msg.bonus !== 0 && (
+        <span style={{ color: "#888" }}>
+          {" "}
+          {msg.bonus > 0 ? "+" : "-"} {Math.abs(msg.bonus)}
         </span>
-      ))}
-      {(isPowerRoll ? msg.bonus + adj + skillBonus : msg.bonus) !== 0 && (() => {
-        const mod = isPowerRoll ? msg.bonus + adj + skillBonus : msg.bonus;
-        return <span style={{ color: "#888" }}> ({mod > 0 ? "+ " : "- "}{Math.abs(mod)})</span>;
-      })()}
+      )}
       <span style={{ color: "#555" }}> = </span>
       <span style={{ color: "#a78bfa", fontWeight: 700 }}>{total}</span>
-      {isPowerRoll && (
+      {nat === "crit" && (
         <>
-          <span style={{ color: "#555" }}> | </span>
-          <span style={{ background: "#c4b5fd", color: "#1a1a2e", fontWeight: 700, borderRadius: "3px", padding: "0 4px", whiteSpace: "nowrap" }}>Tier {powerRollTier(total, msg.netEdges!, crit)}</span>
-          {crit && <> <span style={{ background: "#ef4444", color: "#1a1a2e", fontWeight: 700, borderRadius: "3px", padding: "0 4px" }}>Crit!</span></>}
+          {" "}
+          <span style={{ color: "#fbbf24", fontWeight: 700 }}>🎉 大成功！</span>
+        </>
+      )}
+      {nat === "fail" && (
+        <>
+          {" "}
+          <span style={{ color: "#ef4444", fontWeight: 700 }}>💀 大失败…</span>
         </>
       )}
     </span>
   );
+}
+
+// --- 导出 BBCode ---
+
+function formatMsgBBCode(m: ChatMessage): string | null {
+  if (m.type === "text") {
+    if (m.ooc) return null;
+    return `[color=silver]<${m.playerName}>[/color] [color=${m.playerColor}]${m.text}[/color]`;
+  }
+  const total = rollTotal(m.dice, m.bonus, m.keep);
+  const nat = nat20Result(m.dice, m.keep);
+  const natText = nat === "crit" ? " 🎉大成功" : nat === "fail" ? " 💀大失败" : "";
+  return (
+    `[color=silver]<${m.playerName}>[/color] ` +
+    `[color=${m.playerColor}][i]🎲 ${rollTitle(m.label, m.keep)} ${diceNotation(m.dice, 0, m.keep)}：` +
+    `${bbcodeDiceExpr(m)} = [b]${total}[/b]${natText}[/i][/color]`
+  );
+}
+
+function exportBBCode(messages: ChatMessage[]) {
+  const lines = messages
+    .map(formatMsgBBCode)
+    .filter((l): l is string => l !== null);
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  a.href = url;
+  a.download = `hoot-chat-记录-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // --- component ---
@@ -201,6 +251,7 @@ export default function App() {
   const [allMessages, setAllMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [helpEntries, setHelpEntries] = useState<{ anchorId: string; key: number }[]>([]);
+  const [clearArmed, setClearArmed] = useState(false);
 
   const playerIdRef = useRef("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -208,6 +259,7 @@ export default function App() {
   const allMessagesRef = useRef<ChatMessage[]>([]);
   const seenRef = useRef(new Set<string>());
   const isHostRef = useRef(false);
+  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function writeHistory(messages: ChatMessage[]) {
     if (!isHostRef.current) return;
@@ -240,6 +292,14 @@ export default function App() {
     allMessagesRef.current = updated;
     setAllMessages(updated);
     writeHistory(updated);
+  }
+
+  function clearAll() {
+    seenRef.current.clear();
+    allMessagesRef.current = [];
+    setAllMessages([]);
+    writeHistory([]);
+    OBR.broadcast.sendMessage(CLEAR_CHANNEL, null).catch(console.error);
   }
 
   const sendOpen = () =>
@@ -287,6 +347,14 @@ export default function App() {
       // Receive messages from other clients (and echoed own messages)
       unsubs.push(OBR.broadcast.onMessage(MSG_BROADCAST_CHANNEL, (event) => {
         if (event.data) addMessages([event.data as ChatMessage]);
+      }));
+
+      // Receive clear requests from other clients
+      unsubs.push(OBR.broadcast.onMessage(CLEAR_CHANNEL, () => {
+        seenRef.current.clear();
+        allMessagesRef.current = [];
+        setAllMessages([]);
+        writeHistory([]);
       }));
 
       unsubs.push(
@@ -359,16 +427,11 @@ export default function App() {
             const value = flat.type === "D10" && raw === 0 ? 10 : raw;
             return [{ type: flat.type, value }];
           });
-          const netEdges = rawRoll.specialRollData?.type === "POWER_ROLL"
-            ? rawRoll.specialRollData.netEdges
-            : undefined;
-          // For power rolls use specialRollData.bonus (character attribute bonus
-          // only), not rawRoll.bonus which folds in the edge/bane adjustment.
-          const bonus = netEdges !== undefined
+          // 官方骰子的 Draw Steel power roll 不再特殊处理，按普通骰子展示
+          const bonus = rawRoll.specialRollData?.type === "POWER_ROLL"
             ? (rawRoll.specialRollData?.bonus ?? 0)
             : rawRoll.bonus;
-          const hasSkill = rawRoll.specialRollData?.hasSkill ?? false;
-          sendRoll(dice, bonus, netEdges, hasSkill).catch(console.error);
+          sendRoll(dice, bonus).catch(console.error);
         })
       );
 
@@ -402,21 +465,58 @@ export default function App() {
       return;
     }
 
-    const normalized = text.replace(/^\/r\b/, "/roll").replace(/^\/p\b/, "/power");
+    // 场外发言：// 开头，暗化显示，不参与导出
+    if (text.startsWith("//")) {
+      const oocText = text.slice(2).trim();
+      if (!oocText) return;
+      setInput("");
+      const msg: ChatMessage = {
+        id: newId(),
+        playerId: playerIdRef.current,
+        playerName: await OBR.player.getName(),
+        playerColor: await OBR.player.getColor(),
+        type: "text",
+        text: oocText,
+        ooc: true,
+        timestamp: Date.now(),
+      };
+      addMessages([msg]);
+      OBR.broadcast.sendMessage(MSG_BROADCAST_CHANNEL, msg).catch(console.error);
+      return;
+    }
+
+    const normalized = text
+      .replace(/^\/advantage\b/, "/adv")
+      .replace(/^\/disadvantage\b/, "/dis")
+      .replace(/^\/r\b/, "/roll");
 
     if (normalized.startsWith("/roll")) {
       const result = parseAndRoll(normalized.slice(5).trim());
       if (!result) return;
       setInput("");
-      sendRoll(result.dice, result.bonus).catch(console.error);
+      sendRoll(result.dice, result.bonus, result.keep, result.label).catch(console.error);
       return;
     }
 
-    if (normalized.startsWith("/power")) {
-      const result = parsePowerRoll(normalized.slice(6).trim());
+    if (normalized === "/adv" || normalized.startsWith("/adv ")) {
+      const result = parseAdvDis(normalized.slice(4).trim(), "h");
       if (!result) return;
       setInput("");
-      sendRoll(result.dice, result.bonus, result.netEdges, result.hasSkill).catch(console.error);
+      sendRoll(result.dice, result.bonus, result.keep, result.label).catch(console.error);
+      return;
+    }
+
+    if (normalized === "/dis" || normalized.startsWith("/dis ")) {
+      const result = parseAdvDis(normalized.slice(4).trim(), "l");
+      if (!result) return;
+      setInput("");
+      sendRoll(result.dice, result.bonus, result.keep, result.label).catch(console.error);
+      return;
+    }
+
+    if (normalized === "/clear") {
+      setInput("");
+      armClear();
       return;
     }
 
@@ -436,8 +536,8 @@ export default function App() {
     OBR.broadcast.sendMessage(MSG_BROADCAST_CHANNEL, msg).catch(console.error);
   }
 
-  async function sendRoll(dice: RollDie[], bonus: number, netEdges?: number, hasSkill?: boolean) {
-    const msg: ChatMessage = {
+  async function sendRoll(dice: RollDie[], bonus: number, keep?: KeepSpec, label?: string) {
+    const msg: RollMessage = {
       id: newId(),
       playerId: playerIdRef.current,
       playerName: await OBR.player.getName(),
@@ -445,13 +545,24 @@ export default function App() {
       type: "roll",
       dice,
       bonus,
-      ...(netEdges !== undefined && { netEdges }),
-      ...(hasSkill && { hasSkill }),
+      ...(keep && { keep }),
+      ...(label && { label }),
       timestamp: Date.now(),
     };
 
     addMessages([msg]);
     OBR.broadcast.sendMessage(MSG_BROADCAST_CHANNEL, msg).catch(console.error);
+  }
+
+  function armClear() {
+    if (clearArmed) {
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+      setClearArmed(false);
+      clearAll();
+      return;
+    }
+    setClearArmed(true);
+    clearTimerRef.current = setTimeout(() => setClearArmed(false), 5000);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -462,14 +573,25 @@ export default function App() {
   }
 
   if (!ready) {
-    return <div style={styles.loading}>Connecting…</div>;
+    return <div style={styles.loading}>连接中…</div>;
   }
 
   return (
     <div style={styles.container}>
+      <div style={styles.toolbar}>
+        <button style={styles.toolButton} onClick={() => exportBBCode(allMessages)}>
+          导出记录
+        </button>
+        <button
+          style={{ ...styles.toolButton, ...(clearArmed ? styles.toolButtonDanger : {}) }}
+          onClick={armClear}
+        >
+          {clearArmed ? "⚠ 再点一次确认清空" : "清空记录"}
+        </button>
+      </div>
       <div style={styles.messageList}>
         {allMessages.length === 0 && helpEntries.length === 0 && (
-          <div style={styles.empty}>No messages yet. Say hello!</div>
+          <div style={styles.empty}>还没有消息，打个招呼吧！</div>
         )}
         {(() => {
           // Build a map from anchorId -> help keys to insert after that message.
@@ -483,40 +605,63 @@ export default function App() {
           const helpCard = (key: number) => (
             <div key={`help-${key}`} style={styles.helpCard}>
               <div style={styles.helpHeader}>
-                <span style={styles.helpTitle}>Commands</span>
+                <span style={styles.helpTitle}>指令</span>
               </div>
               <div style={styles.helpSection}>
-                <div><code style={styles.helpCmd}>/roll</code> <span style={styles.helpAlias}>(or /r)</span></div>
+                <div><code style={styles.helpCmd}>/roll</code> <span style={styles.helpAlias}>（或 /r）</span>掷骰</div>
                 <div style={styles.helpIndent}>
-                  <div style={styles.helpExample}>/roll 2d6+3 &nbsp;·&nbsp; /r 1d20 &nbsp;·&nbsp; /r 3d8 + 1d4</div>
-                  Roll dice
-                </div>
-              </div>
-              <div style={styles.helpSection}>
-                <div><code style={styles.helpCmd}>/power</code> <span style={styles.helpAlias}>(or /p)</span></div>
-                <div style={styles.helpIndent}>
-                  <div style={styles.helpExample}>/power +3 edge &nbsp;·&nbsp; /p 2 db &nbsp;·&nbsp; /p 2 skill</div>
-                  Power roll (2d10)
+                  <div style={styles.helpExample}>/roll 2d6+3 &nbsp;·&nbsp; /r 1d20+6 生存 &nbsp;·&nbsp; /r 4d6dl1</div>
+                  <div>NdX 骰子 · ±N 修正 · 末尾文字为检定名</div>
                   <div style={styles.helpOptions}>
-                    <span><code style={styles.helpCmd}>+[x]</code> or <code style={styles.helpCmd}>[x]</code> &nbsp; add characteristic bonus</span>
-                    <span><code style={styles.helpCmd}>edge</code> or <code style={styles.helpCmd}>e</code> &nbsp; | &nbsp; <code style={styles.helpCmd}>double edge</code> or <code style={styles.helpCmd}>de</code></span>
-                    <span><code style={styles.helpCmd}>bane</code> or <code style={styles.helpCmd}>b</code> &nbsp; | &nbsp; <code style={styles.helpCmd}>double bane</code> or <code style={styles.helpCmd}>db</code></span>
-                    <span><code style={styles.helpCmd}>skill</code> or <code style={styles.helpCmd}>s</code> &nbsp; adds +2 bonus for relevant skill</span>
+                    <span><code style={styles.helpCmd}>khN</code> 取最高 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>klN</code> 取最低 N 颗</span>
+                    <span><code style={styles.helpCmd}>dlN</code> 丢弃最低 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>dhN</code> 丢弃最高 N 颗</span>
                   </div>
                 </div>
+              </div>
+              <div style={styles.helpSection}>
+                <div><code style={styles.helpCmd}>/adv</code> &nbsp;/&nbsp; <code style={styles.helpCmd}>/dis</code> 优势 / 劣势</div>
+                <div style={styles.helpIndent}>
+                  <div style={styles.helpExample}>/adv +6 察觉 &nbsp;·&nbsp; /dis +2</div>
+                  <div>掷 2 颗 d20 取高 / 取低，等价于 /r 2d20kh1+6</div>
+                  <div style={styles.helpOptions}>
+                    <span>单独掷出 20 → 🎉 大成功；掷出 1 → 💀 大失败</span>
+                  </div>
+                </div>
+              </div>
+              <div style={styles.helpSection}>
+                <div><code style={styles.helpCmd}>//文字</code> 场外发言</div>
+                <div style={styles.helpIndent}>
+                  <div style={styles.helpExample}>// 今天先打到这</div>
+                  <div>消息会变暗缩小，且不参与「导出记录」</div>
+                </div>
+              </div>
+              <div style={styles.helpSection}>
+                <div><code style={styles.helpCmd}>/clear</code> 清空全部聊天记录（与上方按钮相同，需二次确认）</div>
               </div>
             </div>
           );
           const items: React.ReactNode[] = [];
           for (const key of helpAfter.get("") ?? []) items.push(helpCard(key));
           for (const msg of allMessages) {
+            const isOoc = msg.type === "text" && !!msg.ooc;
             items.push(
-              <div key={msg.id} style={styles.message}>
+              <div
+                key={msg.id}
+                style={{
+                  ...styles.message,
+                  ...(isOoc ? styles.oocMessage : {}),
+                }}
+              >
                 <span style={{ ...styles.name, ...nameStyle(msg.playerColor) }}>
                   {msg.playerName}
                 </span>
                 <span style={styles.time}>{formatTime(msg.timestamp)}</span>
-                <div style={styles.text}>
+                <div
+                  style={{
+                    ...styles.text,
+                    ...(isOoc ? styles.oocText : {}),
+                  }}
+                >
                   {msg.type === "roll" ? <RollDisplay msg={msg} /> : msg.text}
                 </div>
               </div>
@@ -533,12 +678,12 @@ export default function App() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type a message…"
+          placeholder="输入消息…（// 开头为场外发言）"
           maxLength={500}
           autoFocus
         />
         <button style={styles.button} onClick={sendMessage}>
-          Send
+          发送
         </button>
       </div>
     </div>
@@ -557,6 +702,27 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     height: "100vh",
     color: "#888",
+  },
+  toolbar: {
+    display: "flex",
+    gap: "8px",
+    padding: "6px 10px",
+    borderBottom: "1px solid #2a2a4a",
+    background: "#12121e",
+  },
+  toolButton: {
+    background: "rgba(91, 91, 214, 0.25)",
+    color: "#aaa",
+    border: "1px solid rgba(91, 91, 214, 0.4)",
+    borderRadius: "6px",
+    padding: "4px 10px",
+    cursor: "pointer",
+    fontSize: "12px",
+  },
+  toolButtonDanger: {
+    background: "rgba(239, 68, 68, 0.2)",
+    color: "#f87171",
+    border: "1px solid rgba(239, 68, 68, 0.6)",
   },
   messageList: {
     flex: 1,
@@ -631,6 +797,13 @@ const styles: Record<string, React.CSSProperties> = {
     gridTemplateColumns: "1fr auto",
     gridTemplateRows: "auto auto",
     gap: "2px 8px",
+  },
+  oocMessage: {
+    opacity: 0.45,
+  },
+  oocText: {
+    fontSize: "0.85em",
+    color: "#909090",
   },
   name: {
     fontWeight: 800,
