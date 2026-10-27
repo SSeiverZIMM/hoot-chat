@@ -4,6 +4,7 @@ import { ChatMessage, RollDie, RollMessage } from "./types";
 import {
   KeepSpec,
   bbcodeDiceExpr,
+  bbcodeDroppedSuffix,
   diceNotation,
   keptValues,
   nat20Result,
@@ -262,15 +263,17 @@ function formatMsgBBCode(m: ChatMessage): string | null {
   const rollPart =
     `🎲 [i]${rollTitle(m.label, m.keep)} ${diceNotation(m.dice, 0, m.keep)}：` +
     `${bbcodeDiceExpr(m)} = [b]${total}[/b]${natText}[/i]`;
+  // 被弃骰值附注自带灰色 color 标签，放在玩家色包裹之外，避免嵌套 [color]
+  const droppedNote = bbcodeDroppedSuffix(m);
   if (m.text) {
     return (
       `[color=silver]<${m.playerName}>[/color] ` +
-      `[color=${m.playerColor}]${m.text} ${rollPart}[/color]`
+      `[color=${m.playerColor}]${m.text} ${rollPart}[/color]${droppedNote}`
     );
   }
   return (
     `[color=silver]<${m.playerName}>[/color] ` +
-    `[color=${m.playerColor}]${rollPart}[/color]`
+    `[color=${m.playerColor}]${rollPart}[/color]${droppedNote}`
   );
 }
 
@@ -305,7 +308,7 @@ export default function App() {
   const playerIdRef = useRef("");
   const myNameRef = useRef("");
   const bottomRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastRollFingerprintRef = useRef<string | null>(null);
   const allMessagesRef = useRef<ChatMessage[]>([]);
   const seenRef = useRef(new Set<string>());
@@ -527,6 +530,15 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
   }, [allMessages[allMessages.length - 1]?.id]);
 
+  // 输入框随内容自动增高（上限 120px，超出后内部滚动）
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    el.style.overflowY = el.scrollHeight > 120 ? "auto" : "hidden";
+  }, [input]);
+
   function clearInput() {
     setInput("");
     setWhisperMatch(null);
@@ -715,13 +727,26 @@ export default function App() {
     clearTimerRef.current = setTimeout(() => setClearArmed(false), 5000);
   }
 
-  function handleKeyDown(e: React.KeyboardEvent) {
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Escape" && editingId) {
       e.preventDefault();
       cancelEdit();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
+      // Ctrl/Cmd+Enter：在光标处强制换行
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const el = e.currentTarget;
+        const start = el.selectionStart ?? input.length;
+        const end = el.selectionEnd ?? input.length;
+        setInput(input.slice(0, start) + "\n" + input.slice(end));
+        requestAnimationFrame(() => {
+          el.focus();
+          el.selectionStart = el.selectionEnd = start + 1;
+        });
+        return;
+      }
       e.preventDefault();
       sendMessage();
     }
@@ -780,6 +805,9 @@ export default function App() {
       </div>
       <div style={styles.helpSection}>
         <div><code style={styles.helpCmd}>/clear</code> 清空全部聊天记录（GM 可用，需二次确认）</div>
+      </div>
+      <div style={styles.helpSection}>
+        <div>Enter 发送 · Ctrl+Enter 换行 · 右键消息可修改 / 删除</div>
       </div>
       <div style={styles.helpSection}>
         <div>右键消息</div>
@@ -927,8 +955,9 @@ export default function App() {
         >
           ?
         </button>
-        <input
+        <textarea
           ref={inputRef}
+          rows={1}
           style={{ ...styles.input, ...(editingId ? styles.inputEditing : {}) }}
           value={input}
           onChange={(e) => {
@@ -1051,15 +1080,15 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "text",
   },
   helpToggle: {
-    width: "28px",
-    height: "28px",
+    width: "22px",
+    height: "22px",
     flexShrink: 0,
     borderRadius: "50%",
     border: "none",
     background: "transparent",
     color: "#666",
     cursor: "pointer",
-    fontSize: "16px",
+    fontSize: "13px",
     fontWeight: 700,
     lineHeight: 1,
     padding: 0,
@@ -1213,9 +1242,11 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#d0d0d0",
     lineHeight: 1.4,
     wordBreak: "break-word",
+    whiteSpace: "pre-wrap",
   },
   inputRow: {
     display: "flex",
+    alignItems: "center",
     gap: "8px",
     padding: "10px",
     borderTop: "1px solid #2a2a4a",
@@ -1229,7 +1260,10 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "8px 10px",
     color: "#e0e0e0",
     fontSize: "14px",
+    fontFamily: "inherit",
+    lineHeight: 1.4,
     outline: "none",
+    resize: "none",
   },
   button: {
     background: "#5b5bd6",

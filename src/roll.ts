@@ -75,20 +75,20 @@ export function nat20Result(
   return null;
 }
 
-/** 导出 BBCode 用：骰值表达式，如 "[b]17[/b] + [s][color=gray]8[/color][/s] + 6" */
+/** 导出 BBCode 用：有效骰值表达式（不含被弃骰），如 "[b]17[/b] + 6" */
 export function bbcodeDiceExpr(msg: RollMessage): string {
   const { kept } = keptValues(msg.dice, msg.keep);
-  const keptCopy = [...kept];
-  const parts = msg.dice.map((d) => {
-    const idx = keptCopy.indexOf(d.value);
-    if (idx >= 0) {
-      keptCopy.splice(idx, 1);
-      return `[b]${d.value}[/b]`;
-    }
-    return `[s][color=gray]${d.value}[/color][/s]`;
-  });
+  const parts = kept.map((v) => `[b]${v}[/b]`);
   if (msg.bonus !== 0) {
     parts.push(msg.bonus > 0 ? `+${msg.bonus}` : `${msg.bonus}`);
   }
   return parts.join(" + ");
+}
+
+/** 导出 BBCode 用：被弃骰值附注，如 " [color=gray][i]（弃 8）[/i][/color]"；无被弃骰时为空串 */
+export function bbcodeDroppedSuffix(msg: RollMessage): string {
+  const { dropped } = keptValues(msg.dice, msg.keep);
+  if (dropped.length === 0) return "";
+  const vals = dropped.map((v) => `[s]${v}[/s]`).join("、");
+  return ` [color=gray][i]（弃 ${vals}）[/i][/color]`;
 }
