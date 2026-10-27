@@ -23,6 +23,7 @@ export interface RollMessage extends ChatMessageBase {
   bonus: number;
   keep?: { mode: "h" | "l"; n: number }; // khN/klN：掷多颗取高/取低
   label?: string; // 检定名，如"生存"
+  text?: string; // 行内指令时骰子前的叙述文字
 }
 
 export type ChatMessage = TextMessage | RollMessage;

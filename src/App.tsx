@@ -168,6 +168,29 @@ function parseAdvDis(args: string, mode: "h" | "l"): ParsedRoll | null {
   return { dice, bonus, keep: { mode, n: 1 }, label };
 }
 
+type RollKind = "roll" | "adv" | "dis";
+
+/** 解析一条完整的骰子指令输入，如 "/r d20+6 长剑命中"、"/adv +6 察觉" */
+function parseRollInput(input: string): { kind: RollKind; parsed: ParsedRoll } | null {
+  const cmd = input
+    .replace(/^\/advantage\b/i, "/adv")
+    .replace(/^\/disadvantage\b/i, "/dis");
+  if (/^\/(r|roll)(\s|$)/i.test(cmd)) {
+    const rest = cmd.replace(/^\/(r|roll)\s*/i, "");
+    const parsed = parseAndRoll(rest);
+    return parsed ? { kind: "roll", parsed } : null;
+  }
+  if (/^\/adv(\s|$)/i.test(cmd)) {
+    const parsed = parseAdvDis(cmd.replace(/^\/adv\s*/i, ""), "h");
+    return parsed ? { kind: "adv", parsed } : null;
+  }
+  if (/^\/dis(\s|$)/i.test(cmd)) {
+    const parsed = parseAdvDis(cmd.replace(/^\/dis\s*/i, ""), "l");
+    return parsed ? { kind: "dis", parsed } : null;
+  }
+  return null;
+}
+
 // --- 掷骰渲染（聊天窗口）---
 
 function RollDisplay({ msg }: { msg: RollMessage }) {
@@ -178,6 +201,7 @@ function RollDisplay({ msg }: { msg: RollMessage }) {
 
   return (
     <span>
+      {msg.text && <span>{msg.text} </span>}
       <span style={{ color: "#888", fontStyle: "italic" }}>🎲 {rollTitle(msg.label, msg.keep)} </span>
       <span style={{ color: "#555" }}>{diceNotation(msg.dice, 0, msg.keep)}： </span>
       {msg.dice.map((d, i) => {
@@ -233,10 +257,18 @@ function formatMsgBBCode(m: ChatMessage): string | null {
   const total = rollTotal(m.dice, m.bonus, m.keep);
   const nat = nat20Result(m.dice, m.keep);
   const natText = nat === "crit" ? " 🎉大成功" : nat === "fail" ? " 💀大失败" : "";
+  const rollPart =
+    `[i]🎲 ${rollTitle(m.label, m.keep)} ${diceNotation(m.dice, 0, m.keep)}：` +
+    `${bbcodeDiceExpr(m)} = [b]${total}[/b]${natText}[/i]`;
+  if (m.text) {
+    return (
+      `[color=silver]<${m.playerName}>[/color] ` +
+      `[color=${m.playerColor}]${m.text} ${rollPart}[/color]`
+    );
+  }
   return (
     `[color=silver]<${m.playerName}>[/color] ` +
-    `[color=${m.playerColor}][i]🎲 ${rollTitle(m.label, m.keep)} ${diceNotation(m.dice, 0, m.keep)}：` +
-    `${bbcodeDiceExpr(m)} = [b]${total}[/b]${natText}[/i][/color]`
+    `[color=${m.playerColor}]${rollPart}[/color]`
   );
 }
 
@@ -496,39 +528,33 @@ export default function App() {
       return;
     }
 
-    const normalized = text
-      .replace(/^\/advantage\b/, "/adv")
-      .replace(/^\/disadvantage\b/, "/dis")
-      .replace(/^\/r\b/, "/roll");
-
-    if (normalized.startsWith("/roll")) {
-      const result = parseAndRoll(normalized.slice(5).trim());
-      if (!result) return;
-      setInput("");
-      sendRoll(result.dice, result.bonus, result.keep, result.label).catch(console.error);
-      return;
-    }
-
-    if (normalized === "/adv" || normalized.startsWith("/adv ")) {
-      const result = parseAdvDis(normalized.slice(4).trim(), "h");
-      if (!result) return;
-      setInput("");
-      sendRoll(result.dice, result.bonus, result.keep, result.label).catch(console.error);
-      return;
-    }
-
-    if (normalized === "/dis" || normalized.startsWith("/dis ")) {
-      const result = parseAdvDis(normalized.slice(4).trim(), "l");
-      if (!result) return;
-      setInput("");
-      sendRoll(result.dice, result.bonus, result.keep, result.label).catch(console.error);
-      return;
-    }
-
-    if (normalized === "/clear") {
+    if (text === "/clear") {
       setInput("");
       armClear();
       return;
+    }
+
+    if (text.startsWith("/")) {
+      const result = parseRollInput(text);
+      if (!result) return; // 未知指令：不发送
+      setInput("");
+      const p = result.parsed;
+      sendRoll(p.dice, p.bonus, p.keep, p.label).catch(console.error);
+      return;
+    }
+
+    // 行内骰指令：指令前有叙述文字，如"玛格丽特拔剑 /r d20+6 长剑命中"
+    const inlineMatch = text.match(/(?:^|\s)\/(?:r|roll|adv|advantage|dis|disadvantage)(?=\s|$)/i);
+    if (inlineMatch && inlineMatch.index !== undefined && inlineMatch.index > 0) {
+      const prefix = text.slice(0, inlineMatch.index).trim();
+      const result = parseRollInput(text.slice(inlineMatch.index).trim());
+      if (result) {
+        setInput("");
+        const p = result.parsed;
+        sendRoll(p.dice, p.bonus, p.keep, p.label, prefix).catch(console.error);
+        return;
+      }
+      // 解析失败 → 落回普通文本消息
     }
 
     setInput("");
@@ -547,7 +573,7 @@ export default function App() {
     OBR.broadcast.sendMessage(MSG_BROADCAST_CHANNEL, msg).catch(console.error);
   }
 
-  async function sendRoll(dice: RollDie[], bonus: number, keep?: KeepSpec, label?: string) {
+  async function sendRoll(dice: RollDie[], bonus: number, keep?: KeepSpec, label?: string, text?: string) {
     const msg: RollMessage = {
       id: newId(),
       playerId: playerIdRef.current,
@@ -558,6 +584,7 @@ export default function App() {
       bonus,
       ...(keep && { keep }),
       ...(label && { label }),
+      ...(text && { text }),
       timestamp: Date.now(),
     };
 
@@ -622,7 +649,8 @@ export default function App() {
                 <div><code style={styles.helpCmd}>/roll</code> <span style={styles.helpAlias}>（或 /r）</span>掷骰</div>
                 <div style={styles.helpIndent}>
                   <div style={styles.helpExample}>/roll 2d6+3 &nbsp;·&nbsp; /r 1d20+6 生存 &nbsp;·&nbsp; /r 4d6dl1</div>
-                  <div>NdX 骰子 · ±N 修正 · 末尾文字为检定名</div>
+                  <div>NdX 骰子 · ±N 修正 · 末尾文字为检定名（斜体显示）</div>
+                  <div>指令也可以嵌在句子中：玛格丽特拔剑 /r d20+6 长剑命中</div>
                   <div style={styles.helpOptions}>
                     <span><code style={styles.helpCmd}>khN</code> 取最高 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>klN</code> 取最低 N 颗</span>
                     <span><code style={styles.helpCmd}>dlN</code> 丢弃最低 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>dhN</code> 丢弃最高 N 颗</span>
