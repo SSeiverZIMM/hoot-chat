@@ -1,4 +1,4 @@
-# 喵语聊天（Hoot Chat 中文版）
+Hoot Chat 中文版
 
 面向中文桌玩家的 [Owlbear Rodeo](https://www.owlbear.rodeo/) 聊天扩展，基于
 [ddfisher/hoot-chat](https://github.com/ddfisher/hoot-chat)（GPL-3.0）汉化与功能增强。
