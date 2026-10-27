@@ -690,7 +690,14 @@ export default function App() {
         </div>
       )}
       {showHelp && (
-        <div style={styles.helpWrap}>{helpCard}</div>
+        <div
+          style={{
+            ...styles.helpWrap,
+            top: isHost ? 48 : 0,
+          }}
+        >
+          {helpCard}
+        </div>
       )}
       <div
         style={{ ...styles.messageList, paddingTop: isHost ? "48px" : "12px" }}
@@ -829,22 +836,28 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "8px",
   },
   helpWrap: {
-    maxHeight: "55%",
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 56,
+    zIndex: 5,
     overflowY: "auto",
-    padding: "8px 12px",
-    borderBottom: "1px solid rgba(42, 42, 74, 0.6)",
-    background: "rgba(18, 18, 30, 0.5)",
+    padding: "10px 12px",
+    background: "rgba(18, 18, 30, 0.97)",
+    borderTop: "1px solid rgba(42, 42, 74, 0.6)",
+    userSelect: "text",
+    cursor: "text",
   },
   helpToggle: {
-    width: "32px",
-    height: "32px",
+    width: "26px",
+    height: "26px",
     flexShrink: 0,
     borderRadius: "50%",
     border: "1px solid #3a3a5a",
     background: "#2a2a4a",
     color: "#aaa",
     cursor: "pointer",
-    fontSize: "15px",
+    fontSize: "13px",
     fontWeight: 700,
     lineHeight: 1,
     padding: 0,
