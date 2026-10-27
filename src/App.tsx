@@ -294,16 +294,23 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [allMessages, setAllMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [helpEntries, setHelpEntries] = useState<{ anchorId: string; key: number }[]>([]);
+  const [showHelp, setShowHelp] = useState(false);
   const [clearArmed, setClearArmed] = useState(false);
+  const [isHost, setIsHost] = useState(false);
 
   const playerIdRef = useRef("");
+  const myNameRef = useRef("");
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastRollFingerprintRef = useRef<string | null>(null);
   const allMessagesRef = useRef<ChatMessage[]>([]);
   const seenRef = useRef(new Set<string>());
   const isHostRef = useRef(false);
   const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function setHostFlag(v: boolean) {
+    isHostRef.current = v;
+    setIsHost(v);
+  }
 
   function writeHistory(messages: ChatMessage[]) {
     if (!isHostRef.current) return;
@@ -376,6 +383,7 @@ export default function App() {
       playerIdRef.current = await OBR.player.getId();
       const playerNameSnapshot = await OBR.player.getName();
       const playerColorSnapshot = await OBR.player.getColor();
+      myNameRef.current = playerNameSnapshot;
 
       // Load history from metadata for cold-start scrollback
       const meta = await OBR.room.getMetadata();
@@ -385,7 +393,7 @@ export default function App() {
       // Determine initial host (player with lexicographically lowest ID)
       const party = await OBR.party.getPlayers();
       const allIds = [playerIdRef.current, ...party.map((p) => p.id)];
-      isHostRef.current = playerIdRef.current === [...allIds].sort()[0];
+      setHostFlag(playerIdRef.current === [...allIds].sort()[0]);
 
 
       // Receive messages from other clients (and echoed own messages)
@@ -404,7 +412,7 @@ export default function App() {
       unsubs.push(
         OBR.party.onChange((party) => {
           const allIds = [playerIdRef.current, ...party.map((p) => p.id)];
-          isHostRef.current = playerIdRef.current === [...allIds].sort()[0];
+          setHostFlag(playerIdRef.current === [...allIds].sort()[0]);
           for (const p of party) updatePlayerInfo(p.id, p.name, p.color);
         })
       );
@@ -416,6 +424,7 @@ export default function App() {
           if (player.name === lastName && player.color === lastColor) return;
           lastName = player.name;
           lastColor = player.color;
+          myNameRef.current = player.name;
           updatePlayerInfo(playerIdRef.current, player.name, player.color);
         })
       );
@@ -495,37 +504,16 @@ export default function App() {
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
   }, [allMessages[allMessages.length - 1]?.id]);
 
-  useEffect(() => {
-    if (helpEntries.length > 0) bottomRef.current?.scrollIntoView({ behavior: "instant" });
-  }, [helpEntries.length]);
-
   async function sendMessage() {
     const text = input.trim();
     if (!text) return;
-
-    if (text === "/help" || text === "/h") {
-      setHelpEntries((prev) => [...prev, { anchorId: allMessagesRef.current[allMessagesRef.current.length - 1]?.id ?? "", key: Date.now() }]);
-      setInput("");
-      return;
-    }
 
     // 场外发言：// 开头，暗化显示，不参与导出
     if (text.startsWith("//")) {
       const oocText = text.slice(2).trim();
       if (!oocText) return;
       setInput("");
-      const msg: ChatMessage = {
-        id: newId(),
-        playerId: playerIdRef.current,
-        playerName: await OBR.player.getName(),
-        playerColor: await OBR.player.getColor(),
-        type: "text",
-        text: oocText,
-        ooc: true,
-        timestamp: Date.now(),
-      };
-      addMessages([msg]);
-      OBR.broadcast.sendMessage(MSG_BROADCAST_CHANNEL, msg).catch(console.error);
+      await sendText(oocText, { ooc: true });
       return;
     }
 
@@ -536,6 +524,21 @@ export default function App() {
     }
 
     if (text.startsWith("/")) {
+      // 暗骰发言：仅自己可见
+      if (/^\/s(\s|$)/i.test(text)) {
+        const content = text.replace(/^\/s\s*/i, "").trim();
+        if (!content) return;
+        setInput("");
+        await sendText(content, { hidden: true });
+        return;
+      }
+      // 悄悄话：仅目标玩家可见
+      const whisperMatch = text.match(/^\/@(\S+)\s+([\s\S]+)$/);
+      if (whisperMatch) {
+        setInput("");
+        await sendText(whisperMatch[2].trim(), { whisper: whisperMatch[1] });
+        return;
+      }
       const result = parseRollInput(text);
       if (!result) return; // 未知指令：不发送
       setInput("");
@@ -559,7 +562,10 @@ export default function App() {
     }
 
     setInput("");
+    await sendText(text);
+  }
 
+  async function sendText(text: string, extra?: { ooc?: boolean; hidden?: boolean; whisper?: string }) {
     const msg: ChatMessage = {
       id: newId(),
       playerId: playerIdRef.current,
@@ -568,8 +574,8 @@ export default function App() {
       type: "text",
       text,
       timestamp: Date.now(),
+      ...extra,
     };
-
     addMessages([msg]);
     OBR.broadcast.sendMessage(MSG_BROADCAST_CHANNEL, msg).catch(console.error);
   }
@@ -615,104 +621,147 @@ export default function App() {
     return <div style={styles.loading}>连接中…</div>;
   }
 
+  const helpCard = (
+    <div style={styles.helpCard}>
+      <div style={styles.helpHeader}>
+        <span style={styles.helpTitle}>指令</span>
+      </div>
+      <div style={styles.helpSection}>
+        <div><code style={styles.helpCmd}>/roll</code> <span style={styles.helpAlias}>（或 /r）</span>掷骰</div>
+        <div style={styles.helpIndent}>
+          <div style={styles.helpExample}>/roll 2d6+3 &nbsp;·&nbsp; /r 1d20+6 生存 &nbsp;·&nbsp; /r 4d6dl1</div>
+          <div>NdX 骰子 · ±N 修正 · 末尾文字为检定名（斜体显示）</div>
+          <div>指令也可以嵌在句子中：玛格丽特拔剑 /r d20+6 长剑命中</div>
+          <div style={styles.helpOptions}>
+            <span><code style={styles.helpCmd}>khN</code> 取最高 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>klN</code> 取最低 N 颗</span>
+            <span><code style={styles.helpCmd}>dlN</code> 丢弃最低 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>dhN</code> 丢弃最高 N 颗</span>
+          </div>
+        </div>
+      </div>
+      <div style={styles.helpSection}>
+        <div><code style={styles.helpCmd}>/adv</code> &nbsp;/&nbsp; <code style={styles.helpCmd}>/dis</code> 优势 / 劣势</div>
+        <div style={styles.helpIndent}>
+          <div style={styles.helpExample}>/adv +6 察觉 &nbsp;·&nbsp; /dis +2</div>
+          <div>掷 2 颗 d20 取高 / 取低，等价于 /r 2d20kh1+6</div>
+          <div style={styles.helpOptions}>
+            <span>单独掷出 20 → 🎉 大成功；掷出 1 → 💀 大失败</span>
+          </div>
+        </div>
+      </div>
+      <div style={styles.helpSection}>
+        <div><code style={styles.helpCmd}>/s 文字</code> 暗骰发言</div>
+        <div style={styles.helpIndent}>
+          <div>仅自己可见，他人只会看到「有人在暗中密谋着行动……」</div>
+        </div>
+      </div>
+      <div style={styles.helpSection}>
+        <div><code style={styles.helpCmd}>/@玩家名 文字</code> 悄悄话</div>
+        <div style={styles.helpIndent}>
+          <div style={styles.helpExample}>/@张三 把卷轴藏进袖中</div>
+          <div>仅对方可见，他人只会看到「有人在暗中密谋着行动……」</div>
+        </div>
+      </div>
+      <div style={styles.helpSection}>
+        <div><code style={styles.helpCmd}>//文字</code> 场外发言</div>
+        <div style={styles.helpIndent}>
+          <div style={styles.helpExample}>// 今天先打到这</div>
+          <div>消息会变暗缩小，且不参与「导出」</div>
+        </div>
+      </div>
+      <div style={styles.helpSection}>
+        <div><code style={styles.helpCmd}>/clear</code> 清空全部聊天记录（GM 可用，需二次确认）</div>
+      </div>
+    </div>
+  );
+
   return (
     <div style={styles.container}>
-      <div style={styles.toolbar}>
-        <button style={styles.toolButton} onClick={() => exportBBCode(allMessages)}>
-          导出
-        </button>
-        <button
-          style={{ ...styles.toolButton, ...(clearArmed ? styles.toolButtonDanger : {}) }}
-          onClick={armClear}
-        >
-          {clearArmed ? "确认清空？" : "清空"}
-        </button>
-      </div>
-      <div style={styles.messageList}>
-        {allMessages.length === 0 && helpEntries.length === 0 && (
+      {isHost && (
+        <div style={styles.toolbar}>
+          <button style={styles.toolButton} onClick={() => exportBBCode(allMessages)}>
+            导出
+          </button>
+          <button
+            style={{ ...styles.toolButton, ...(clearArmed ? styles.toolButtonDanger : {}) }}
+            onClick={armClear}
+          >
+            {clearArmed ? "确认清空？" : "清空"}
+          </button>
+        </div>
+      )}
+      {showHelp && (
+        <div style={styles.helpWrap}>{helpCard}</div>
+      )}
+      <div
+        style={{ ...styles.messageList, paddingTop: isHost ? "48px" : "12px" }}
+      >
+        {allMessages.length === 0 && (
           <div style={styles.empty}>还没有消息，打个招呼吧！</div>
         )}
-        {(() => {
-          // Build a map from anchorId -> help keys to insert after that message.
-          // anchorId "" means insert before all messages.
-          const helpAfter = new Map<string, number[]>();
-          for (const { anchorId, key } of helpEntries) {
-            const list = helpAfter.get(anchorId) ?? [];
-            list.push(key);
-            helpAfter.set(anchorId, list);
-          }
-          const helpCard = (key: number) => (
-            <div key={`help-${key}`} style={styles.helpCard}>
-              <div style={styles.helpHeader}>
-                <span style={styles.helpTitle}>指令</span>
-              </div>
-              <div style={styles.helpSection}>
-                <div><code style={styles.helpCmd}>/roll</code> <span style={styles.helpAlias}>（或 /r）</span>掷骰</div>
-                <div style={styles.helpIndent}>
-                  <div style={styles.helpExample}>/roll 2d6+3 &nbsp;·&nbsp; /r 1d20+6 生存 &nbsp;·&nbsp; /r 4d6dl1</div>
-                  <div>NdX 骰子 · ±N 修正 · 末尾文字为检定名（斜体显示）</div>
-                  <div>指令也可以嵌在句子中：玛格丽特拔剑 /r d20+6 长剑命中</div>
-                  <div style={styles.helpOptions}>
-                    <span><code style={styles.helpCmd}>khN</code> 取最高 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>klN</code> 取最低 N 颗</span>
-                    <span><code style={styles.helpCmd}>dlN</code> 丢弃最低 N 颗 &nbsp;·&nbsp; <code style={styles.helpCmd}>dhN</code> 丢弃最高 N 颗</span>
-                  </div>
-                </div>
-              </div>
-              <div style={styles.helpSection}>
-                <div><code style={styles.helpCmd}>/adv</code> &nbsp;/&nbsp; <code style={styles.helpCmd}>/dis</code> 优势 / 劣势</div>
-                <div style={styles.helpIndent}>
-                  <div style={styles.helpExample}>/adv +6 察觉 &nbsp;·&nbsp; /dis +2</div>
-                  <div>掷 2 颗 d20 取高 / 取低，等价于 /r 2d20kh1+6</div>
-                  <div style={styles.helpOptions}>
-                    <span>单独掷出 20 → 🎉 大成功；掷出 1 → 💀 大失败</span>
-                  </div>
-                </div>
-              </div>
-              <div style={styles.helpSection}>
-                <div><code style={styles.helpCmd}>//文字</code> 场外发言</div>
-                <div style={styles.helpIndent}>
-                  <div style={styles.helpExample}>// 今天先打到这</div>
-                  <div>消息会变暗缩小，且不参与「导出记录」</div>
-                </div>
-              </div>
-              <div style={styles.helpSection}>
-                <div><code style={styles.helpCmd}>/clear</code> 清空全部聊天记录（与上方按钮相同，需二次确认）</div>
+        {allMessages.map((msg) => {
+          const isOoc = msg.type === "text" && !!msg.ooc;
+          const textMsg = msg.type === "text" ? msg : null;
+          const secret = textMsg
+            ? textMsg.hidden
+              ? "self"
+              : textMsg.whisper
+                ? "player"
+                : null
+            : null;
+          const canSee =
+            secret === "self"
+              ? textMsg !== null && msg.playerId === playerIdRef.current
+              : secret === "player" && textMsg !== null
+                ? msg.playerId === playerIdRef.current ||
+                  (textMsg.whisper ?? "").toLowerCase() === myNameRef.current.toLowerCase()
+                : true;
+          const isPlaceholder = secret !== null && !canSee;
+          return (
+            <div
+              key={msg.id}
+              style={{
+                ...styles.message,
+                ...(isOoc ? styles.oocMessage : {}),
+              }}
+            >
+              <span style={{ ...styles.name, ...nameStyle(msg.playerColor) }}>
+                {msg.playerName}
+              </span>
+              <span style={styles.time}>{formatTime(msg.timestamp)}</span>
+              <div
+                style={{
+                  ...styles.text,
+                  ...(isOoc ? styles.oocText : {}),
+                }}
+              >
+                {isPlaceholder ? (
+                  <span style={styles.secretPlaceholder}>有人在暗中密谋着行动……</span>
+                ) : msg.type === "roll" ? (
+                  <RollDisplay msg={msg} />
+                ) : (
+                  <>
+                    {msg.hidden && <span style={styles.secretTag}>暗骰 </span>}
+                    {msg.whisper && <span style={styles.secretTag}>→{msg.whisper} </span>}
+                    {msg.text}
+                  </>
+                )}
               </div>
             </div>
           );
-          const items: React.ReactNode[] = [];
-          for (const key of helpAfter.get("") ?? []) items.push(helpCard(key));
-          for (const msg of allMessages) {
-            const isOoc = msg.type === "text" && !!msg.ooc;
-            items.push(
-              <div
-                key={msg.id}
-                style={{
-                  ...styles.message,
-                  ...(isOoc ? styles.oocMessage : {}),
-                }}
-              >
-                <span style={{ ...styles.name, ...nameStyle(msg.playerColor) }}>
-                  {msg.playerName}
-                </span>
-                <span style={styles.time}>{formatTime(msg.timestamp)}</span>
-                <div
-                  style={{
-                    ...styles.text,
-                    ...(isOoc ? styles.oocText : {}),
-                  }}
-                >
-                  {msg.type === "roll" ? <RollDisplay msg={msg} /> : msg.text}
-                </div>
-              </div>
-            );
-            for (const key of helpAfter.get(msg.id) ?? []) items.push(helpCard(key));
-          }
-          return items;
-        })()}
+        })}
         <div ref={bottomRef} />
       </div>
       <div style={styles.inputRow}>
+        <button
+          style={{
+            ...styles.helpToggle,
+            ...(showHelp ? styles.helpToggleActive : {}),
+          }}
+          onClick={() => setShowHelp((v) => !v)}
+          title="指令帮助"
+        >
+          ?
+        </button>
         <input
           style={styles.input}
           value={input}
@@ -778,6 +827,40 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     flexDirection: "column",
     gap: "8px",
+  },
+  helpWrap: {
+    maxHeight: "55%",
+    overflowY: "auto",
+    padding: "8px 12px",
+    borderBottom: "1px solid rgba(42, 42, 74, 0.6)",
+    background: "rgba(18, 18, 30, 0.5)",
+  },
+  helpToggle: {
+    width: "32px",
+    height: "32px",
+    flexShrink: 0,
+    borderRadius: "50%",
+    border: "1px solid #3a3a5a",
+    background: "#2a2a4a",
+    color: "#aaa",
+    cursor: "pointer",
+    fontSize: "15px",
+    fontWeight: 700,
+    lineHeight: 1,
+    padding: 0,
+  },
+  helpToggleActive: {
+    background: "#5b5bd6",
+    borderColor: "#5b5bd6",
+    color: "#fff",
+  },
+  secretPlaceholder: {
+    color: "#5a5a6e",
+    fontStyle: "italic",
+  },
+  secretTag: {
+    color: "#888",
+    fontSize: "11px",
   },
   empty: {
     color: "#666",

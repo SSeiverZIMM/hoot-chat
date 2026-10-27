@@ -17,10 +17,21 @@ function msgKey(m: ChatMessage): string {
 
 OBR.onReady(async () => {
   const myId = await OBR.player.getId();
+  let myName = await OBR.player.getName();
+  OBR.player.onChange((p) => {
+    myName = p.name;
+  });
   let chatIsOpen = false;
+
+  function setUnread(unread: boolean) {
+    OBR.action
+      .setIcon(unread ? "/icon-unread.svg" : "/icon.svg")
+      .catch(console.error);
+  }
 
   OBR.broadcast.onMessage(CHAT_STATUS_CHANNEL, (event) => {
     chatIsOpen = event.data === "open";
+    if (chatIsOpen) setUnread(false); // 打开聊天即清除未读角标
   });
   OBR.broadcast.sendMessage(STATUS_REQUEST_CHANNEL, null, { destination: "LOCAL" }).catch(console.error);
 
@@ -92,9 +103,19 @@ OBR.onReady(async () => {
     seen.add(msgKey(msg));
     if (msg.playerId === myId || chatIsOpen) return;
 
+    // 私密消息（/s 暗骰、/@玩家名 悄悄话）：不可见则不弹通知、不计未读
+    if (msg.type === "text" && (msg.hidden || msg.whisper)) {
+      const canSee =
+        !msg.hidden &&
+        !!msg.whisper &&
+        msg.whisper.toLowerCase() === myName.toLowerCase();
+      if (!canSee) return;
+    }
+
     const id = msgKey(msg);
     const timer = setTimeout(() => removeNotif(id), EXPIRE_MS);
     activeNotifs.set(id, { msg, timer });
+    setUnread(true);
 
     if (popoverState === "CLOSED") {
       openPopover(); // sendUpdate deferred until NOTIF_READY

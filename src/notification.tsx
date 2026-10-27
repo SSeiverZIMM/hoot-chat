@@ -125,7 +125,15 @@ function NotifCard({
           whiteSpace: "pre-wrap",
         }}
       >
-        {msg.type === "roll" ? <RollText msg={msg} /> : msg.text}
+        {msg.type === "roll" ? (
+          <RollText msg={msg} />
+        ) : (
+          <>
+            {msg.hidden && <span style={{ color: "#888", fontSize: "11px" }}>暗骰 </span>}
+            {msg.whisper && <span style={{ color: "#888", fontSize: "11px" }}>→{msg.whisper} </span>}
+            {msg.text}
+          </>
+        )}
       </span>
       <button
         onClick={onDismiss}
