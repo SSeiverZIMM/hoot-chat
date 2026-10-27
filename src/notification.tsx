@@ -28,7 +28,8 @@ function RollText({ msg }: { msg: Extract<ChatMessage, { type: "roll" }> }) {
   return (
     <>
       {msg.text && <span>{msg.text} </span>}
-      <span style={{ fontStyle: "italic" }}>🎲 {rollTitle(msg.label, msg.keep)} </span>
+      <span style={{ color: "#888" }}>🎲 </span>
+      <span style={{ fontStyle: "italic" }}>{rollTitle(msg.label, msg.keep)} </span>
       <span style={{ color: "#555" }}>{diceNotation(msg.dice, 0, msg.keep)}： </span>
       {msg.dice.map((d, i) => {
         const idx = keptCopy.indexOf(d.value);

@@ -202,7 +202,8 @@ function RollDisplay({ msg }: { msg: RollMessage }) {
   return (
     <span>
       {msg.text && <span>{msg.text} </span>}
-      <span style={{ color: "#888", fontStyle: "italic" }}>🎲 {rollTitle(msg.label, msg.keep)} </span>
+      <span style={{ color: "#888" }}>🎲 </span>
+      <span style={{ color: "#888", fontStyle: "italic" }}>{rollTitle(msg.label, msg.keep)} </span>
       <span style={{ color: "#555" }}>{diceNotation(msg.dice, 0, msg.keep)}： </span>
       {msg.dice.map((d, i) => {
         const idx = keptCopy.indexOf(d.value);
@@ -258,7 +259,7 @@ function formatMsgBBCode(m: ChatMessage): string | null {
   const nat = nat20Result(m.dice, m.keep);
   const natText = nat === "crit" ? " 🎉大成功" : nat === "fail" ? " 💀大失败" : "";
   const rollPart =
-    `[i]🎲 ${rollTitle(m.label, m.keep)} ${diceNotation(m.dice, 0, m.keep)}：` +
+    `🎲 [i]${rollTitle(m.label, m.keep)} ${diceNotation(m.dice, 0, m.keep)}：` +
     `${bbcodeDiceExpr(m)} = [b]${total}[/b]${natText}[/i]`;
   if (m.text) {
     return (
