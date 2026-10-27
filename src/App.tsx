@@ -68,21 +68,32 @@ interface ParsedRoll {
 
 const DIE_TOKEN = /^([+-]?)(\d*)d(\d+)(kh|kl|dh|dl)?(\d+)?$/i;
 const NUM_TOKEN = /^[+-]?\d+$/;
+const TOKEN_SCAN = /[+-]?\d*d\d+(?:kh|kl|dh|dl)?\d*|[+-]?\d+/gi;
 
-/** 从输入末尾剥离检定名（不含骰子/数字语法的词），返回剩余表达式与检定名 */
+/** 从输入中提取所有骰子/数字 token（表达式）与末尾检定名 */
 function splitLabel(input: string): { expr: string; label?: string } {
-  const segments = input.trim().split(/\s+/);
-  const labelParts: string[] = [];
-  while (segments.length > 0) {
-    const last = segments[segments.length - 1];
-    if (DIE_TOKEN.test(last) || NUM_TOKEN.test(last)) break;
-    labelParts.unshift(last);
-    segments.pop();
+  const s = input.trim();
+  let expr = "";
+  let labelStart = -1;
+  let lastIndex = 0;
+  s.replace(TOKEN_SCAN, (m: string, offset: number) => {
+    // token 之间的间隙文字（非空白）意味着检定名出现在这里
+    const gap = s.slice(lastIndex, offset);
+    if (gap.trim() !== "" && labelStart < 0) labelStart = lastIndex;
+    if (labelStart < 0) expr += m;
+    lastIndex = offset + m.length;
+    return m;
+  });
+  if (labelStart >= 0) {
+    // 检定名在中间：其后的 token 也归入检定名
+    return {
+      expr: s.slice(0, labelStart).replace(/\s+/g, ""),
+      label: s.slice(labelStart).trim(),
+    };
   }
-  return {
-    expr: segments.join(""),
-    label: labelParts.length > 0 ? labelParts.join(" ") : undefined,
-  };
+  const tail = s.slice(lastIndex);
+  const label = tail.trim() !== "" ? tail.trim() : undefined;
+  return { expr: expr.replace(/\s+/g, ""), label };
 }
 
 /** 解析 "2d6+3"、"1d20+6 生存"、"2d20kh1+5"、"4d6dl1" */
