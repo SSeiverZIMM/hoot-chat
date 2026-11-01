@@ -19,7 +19,19 @@ const MSG_BROADCAST_CHANNEL = "com.hootchat/message";
 const EDIT_CHANNEL = "com.hootchat/edit";
 const CLEAR_CHANNEL = "com.hootchat/clear";
 const HISTORY_KEY = "com.hootchat/history";
-const HISTORY_MAX_BYTES = 4 * 1024;
+// room metadata 总池约 16KB 且与其它扩展共享，只存最近一段作跨设备同步
+const HISTORY_MAX_BYTES = 10 * 1024;
+// 本机全量历史：按房间存 localStorage，刷新不丢、导出完整
+const LOCAL_HISTORY_PREFIX = "com.hootchat/history/";
+const LOCAL_AVAILABLE = (() => {
+  try {
+    localStorage.setItem("com.hootchat/probe", "1");
+    localStorage.removeItem("com.hootchat/probe");
+    return true;
+  } catch {
+    return false; // 第三方 iframe 可能禁用存储（如 Safari 严格模式）
+  }
+})();
 
 // --- helpers ---
 
@@ -304,6 +316,9 @@ export default function App() {
   const [whisperMatch, setWhisperMatch] = useState<{ query: string; from: number } | null>(null);
   const [msgMenu, setMsgMenu] = useState<{ x: number; y: number; msg: ChatMessage } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [storageWarning, setStorageWarning] = useState(false);
+
+  const roomIdRef = useRef("");
 
   const playerIdRef = useRef("");
   const myNameRef = useRef("");
@@ -323,25 +338,60 @@ export default function App() {
 
   function writeHistory(messages: ChatMessage[]) {
     if (!isHostRef.current) return;
-    // Serialize each message once, then scan from the end to find how many fit
+    // 预算按 UTF-8 字节算（中文每字 3 字节，按字符数算会超限）
+    const encoder = new TextEncoder();
     const parts = messages.map((m) => JSON.stringify(m));
     let bytes = 2; // [ and ]
     let start = parts.length;
     for (let i = parts.length - 1; i >= 0; i--) {
-      bytes += parts[i].length + (start < parts.length ? 1 : 0); // +1 for comma
+      bytes += encoder.encode(parts[i]).length + (start < parts.length ? 1 : 0); // +1 for comma
       if (bytes > HISTORY_MAX_BYTES) break;
       start = i;
     }
-    OBR.room.setMetadata({ [HISTORY_KEY]: messages.slice(start) }).catch(console.error);
+    OBR.room
+      .setMetadata({ [HISTORY_KEY]: messages.slice(start) })
+      .catch(() => setStorageWarning(true));
+  }
+
+  function localHistoryKey(): string | null {
+    if (!LOCAL_AVAILABLE || !roomIdRef.current) return null;
+    return LOCAL_HISTORY_PREFIX + roomIdRef.current;
+  }
+
+  function saveLocal(messages: ChatMessage[]) {
+    const key = localHistoryKey();
+    if (!key) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(messages));
+    } catch {
+      // 存储被禁用或超限：静默降级，仍有 metadata + 内存兜底
+    }
+  }
+
+  function loadLocal(): ChatMessage[] {
+    const key = localHistoryKey();
+    if (!key) return [];
+    try {
+      const arr = JSON.parse(localStorage.getItem(key) ?? "[]");
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** 统一落档：更新内存 → 写本机全量 → GM 端写跨设备存档 */
+  function commitMessages(updated: ChatMessage[]) {
+    allMessagesRef.current = updated;
+    setAllMessages(updated);
+    saveLocal(updated);
+    writeHistory(updated);
   }
 
   function updatePlayerInfo(playerId: string, name: string, color: string) {
     const updated = allMessagesRef.current.map((m) =>
       m.playerId === playerId ? { ...m, playerName: name, playerColor: color } : m
     );
-    allMessagesRef.current = updated;
-    setAllMessages(updated);
-    writeHistory(updated);
+    commitMessages(updated);
   }
 
   function addMessages(incoming: ChatMessage[]) {
@@ -349,16 +399,12 @@ export default function App() {
     if (newMsgs.length === 0) return;
     newMsgs.forEach((m) => seenRef.current.add(msgKey(m)));
     const updated = [...allMessagesRef.current, ...newMsgs];
-    allMessagesRef.current = updated;
-    setAllMessages(updated);
-    writeHistory(updated);
+    commitMessages(updated);
   }
 
   function clearAll() {
     seenRef.current.clear();
-    allMessagesRef.current = [];
-    setAllMessages([]);
-    writeHistory([]);
+    commitMessages([]);
     OBR.broadcast.sendMessage(CLEAR_CHANNEL, null).catch(console.error);
   }
 
@@ -394,9 +440,19 @@ export default function App() {
       const playerColorSnapshot = await OBR.player.getColor();
       myNameRef.current = playerNameSnapshot;
 
-      // Load history from metadata for cold-start scrollback
+      // Load history: 本机全量（localStorage）∪ 跨设备存档（room metadata），按 id 去重、时间排序
       const meta = await OBR.room.getMetadata();
-      const history = Array.isArray(meta[HISTORY_KEY]) ? (meta[HISTORY_KEY] as ChatMessage[]) : [];
+      try {
+        roomIdRef.current = OBR.room.id;
+      } catch {
+        roomIdRef.current = "";
+      }
+      const cloudHistory = Array.isArray(meta[HISTORY_KEY]) ? (meta[HISTORY_KEY] as ChatMessage[]) : [];
+      const byId = new Map<string, ChatMessage>();
+      for (const m of [...loadLocal(), ...cloudHistory]) {
+        if (m && typeof m.id === "string" && !byId.has(m.id)) byId.set(m.id, m);
+      }
+      const history = [...byId.values()].sort((a, b) => a.timestamp - b.timestamp);
       addMessages(history);
 
       // GM（房主）判定：导出/清空按钮与云端存档写入均由 GM 端负责
@@ -422,17 +478,13 @@ export default function App() {
             m.id === data.id && m.type === "text" ? { ...m, text: data.text! } : m
           );
         } else return;
-        allMessagesRef.current = updated;
-        setAllMessages(updated);
-        writeHistory(updated);
+        commitMessages(updated);
       }));
 
       // Receive clear requests from other clients
       unsubs.push(OBR.broadcast.onMessage(CLEAR_CHANNEL, () => {
         seenRef.current.clear();
-        allMessagesRef.current = [];
-        setAllMessages([]);
-        writeHistory([]);
+        commitMessages([]);
       }));
 
       unsubs.push(
@@ -833,6 +885,11 @@ export default function App() {
           </button>
         </div>
       )}
+      {storageWarning && (
+        <div style={styles.storageWarn}>
+          ⚠ 聊天存档写入失败，新消息只保存在本机浏览器——请尽快点「导出」备份，并避免刷新
+        </div>
+      )}
       {showHelp && (
         <div
           style={{
@@ -1153,6 +1210,16 @@ const styles: Record<string, React.CSSProperties> = {
   secretTag: {
     color: "#888",
     fontSize: "11px",
+  },
+  storageWarn: {
+    margin: "48px 12px 0",
+    padding: "6px 10px",
+    background: "rgba(239, 68, 68, 0.15)",
+    border: "1px solid rgba(239, 68, 68, 0.5)",
+    borderRadius: "6px",
+    color: "#f87171",
+    fontSize: "12px",
+    lineHeight: 1.4,
   },
   empty: {
     color: "#666",
